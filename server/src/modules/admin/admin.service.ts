@@ -1,174 +1,280 @@
 import {
-  Injectable,
-  NotFoundException,
   BadRequestException,
   ConflictException,
-  Logger,
+  Inject,
+  Injectable,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import slugify from 'slugify';
+import * as bcrypt from 'bcryptjs';
 import { Product, ProductDocument } from '../products/schemas/product.schema.js';
 import { Order, OrderDocument } from '../orders/schemas/order.schema.js';
-import { User, UserDocument } from '../users/schemas/user.schema.js';
+import { User, UserDocument, PRIVATE_USER_FIELDS } from '../users/schemas/user.schema.js';
 import { Coupon, CouponDocument } from '../discounts/schemas/coupon.schema.js';
+import { Payment, PaymentDocument } from '../payments/schemas/payment.schema.js';
+import { Category, CategoryDocument } from '../categories/schemas/category.schema.js';
+import { Cart, CartDocument } from '../cart/schemas/cart.schema.js';
+import { Review, ReviewDocument } from '../reviews/schemas/review.schema.js';
+import {
+  ContactMessage,
+  ContactMessageDocument,
+} from '../engagement/schemas/contact-message.schema.js';
+import { SettingsService } from '../settings/settings.service.js';
 import { AdminCreateProductDto } from './dto/create-product.dto.js';
 import { AdminUpdateProductDto } from './dto/update-product.dto.js';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto.js';
 import { AdminCreateDiscountDto } from './dto/create-discount.dto.js';
+import { AdminUpdateDiscountDto } from './dto/update-discount.dto.js';
 import { AdminFilterOrdersDto } from './dto/filter-orders.dto.js';
+import {
+  AdminCreateUserDto,
+  AdminFilterCustomersDto,
+  AdminFilterPaymentsDto,
+  AdminUpdateUserDto,
+} from './dto/customer.dto.js';
+import { containsMatch, exactMatch } from '../../common/utils/regex.js';
+import { idOrField } from '../../common/utils/object-id.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const toSlug = (value: string) =>
+  ((slugify as any).default || slugify)(value, { lower: true, strict: true }) as string;
+
+/** Percentage change vs. the previous period; null when there is no baseline to compare with. */
+const percentChange = (current: number, previous: number) =>
+  previous > 0 ? Number((((current - previous) / previous) * 100).toFixed(1)) : null;
+
+const startOfDay = (date: Date) => {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
 
 @Injectable()
 export class AdminService {
-  private readonly logger = new Logger(AdminService.name);
-
   constructor(
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     @InjectModel(Coupon.name) private readonly couponModel: Model<CouponDocument>,
+    @InjectModel(Payment.name) private readonly paymentModel: Model<PaymentDocument>,
+    @InjectModel(Category.name) private readonly categoryModel: Model<CategoryDocument>,
+    @InjectModel(Cart.name) private readonly cartModel: Model<CartDocument>,
+    @InjectModel(Review.name) private readonly reviewModel: Model<ReviewDocument>,
+    @InjectModel(ContactMessage.name)
+    private readonly messageModel: Model<ContactMessageDocument>,
+    @Inject(SettingsService) private readonly settingsService: SettingsService,
   ) {}
 
-  // 1. Dashboard Metrics
-  async getDashboardMetrics() {
+  // ---------------------------------------------------------------------------
+  // Dashboard
+  // ---------------------------------------------------------------------------
+
+  async getDashboardMetrics(days = 7) {
+    const now = new Date();
+    const periodStart = startOfDay(new Date(now.getTime() - (days - 1) * DAY_MS));
+    const previousStart = new Date(periodStart.getTime() - days * DAY_MS);
+    const notCancelled = { status: { $ne: 'Cancelled' } };
+    const { lowStockThreshold } = await this.settingsService.getCommerce();
+
     const [
-      orders,
+      periodOrders,
+      previousOrders,
       totalCustomers,
+      newCustomers,
+      previousNewCustomers,
       totalProducts,
       lowStockProducts,
       recentOrdersRaw,
+      pendingReviews,
+      newMessages,
+      openOrders,
+      [lifetime],
     ] = await Promise.all([
-      this.orderModel.find({ status: { $ne: 'Cancelled' } }).select('total createdAt').exec(),
-      this.userModel.countDocuments({ role: 'customer' }).exec(),
-      this.productModel.countDocuments().exec(),
-      this.productModel
-        .find({ stockQuantity: { $lte: 15 } })
-        .sort({ stockQuantity: 1 })
-        .limit(6)
+      this.orderModel
+        .find({ ...notCancelled, createdAt: { $gte: periodStart } })
+        .select('total createdAt')
+        .lean()
         .exec(),
       this.orderModel
-        .find()
-        .sort({ createdAt: -1 })
+        .find({ ...notCancelled, createdAt: { $gte: previousStart, $lt: periodStart } })
+        .select('total')
+        .lean()
+        .exec(),
+      this.userModel.countDocuments({ role: 'customer' }).exec(),
+      this.userModel.countDocuments({ role: 'customer', createdAt: { $gte: periodStart } }).exec(),
+      this.userModel
+        .countDocuments({ role: 'customer', createdAt: { $gte: previousStart, $lt: periodStart } })
+        .exec(),
+      this.productModel.countDocuments().exec(),
+      this.productModel
+        .find({ stockQuantity: { $lte: lowStockThreshold } })
+        .sort({ stockQuantity: 1 })
         .limit(6)
+        .lean()
+        .exec(),
+      this.orderModel.find().sort({ createdAt: -1 }).limit(6).lean().exec(),
+      this.reviewModel.countDocuments({ status: 'pending' }).exec(),
+      this.messageModel.countDocuments({ status: 'new' }).exec(),
+      this.orderModel.countDocuments({ status: { $in: ['Confirmed', 'Processing'] } }).exec(),
+      this.orderModel
+        .aggregate([
+          { $match: notCancelled },
+          { $group: { _id: null, revenue: { $sum: '$total' }, orders: { $sum: 1 } } },
+        ])
         .exec(),
     ]);
 
-    const totalOrders = orders.length;
-    const totalRevenue = orders.reduce((sum, o) => sum + (o.total || 0), 0);
-    const averageOrderValue = totalOrders > 0 ? Math.round(totalRevenue / totalOrders) : 0;
+    const revenue = periodOrders.reduce((sum, o) => sum + (o.total || 0), 0);
+    const previousRevenue = previousOrders.reduce((sum, o) => sum + (o.total || 0), 0);
+    const orderCount = periodOrders.length;
 
-    // Format recent orders for dashboard table
-    const recentOrders = recentOrdersRaw.map((o) => {
-      const created = (o as any).createdAt ? new Date((o as any).createdAt) : new Date();
-      const dateFormatted = created.toLocaleDateString('en-GB', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric',
-      });
+    // Daily buckets up to 30 days, weekly buckets for 90 days.
+    const bucketDays = days <= 30 ? 1 : 7;
+    const bucketCount = Math.ceil(days / bucketDays);
+    const buckets = Array.from({ length: bucketCount }, (_, i) => {
+      const start = new Date(periodStart.getTime() + i * bucketDays * DAY_MS);
       return {
-        id: o.orderId,
-        customer: o.customer?.fullName || 'Guest Customer',
-        email: o.customer?.email || '',
-        date: dateFormatted,
-        amount: o.total,
-        payment: o.payment?.status === 'paid' ? 'Paid' : 'Pending',
-        status: o.status,
+        start,
+        label:
+          days === 7
+            ? start.toLocaleDateString('en-US', { weekday: 'short' })
+            : start.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }),
+        amount: 0,
+        orders: 0,
       };
     });
-
-    // Format low-stock alerts
-    const lowStockAlerts = lowStockProducts.map((p) => ({
-      id: p._id.toString(),
-      slug: p.slug,
-      name: p.name,
-      sku: 'LC-' + p.slug.slice(0, 7).toUpperCase(),
-      category: p.category,
-      price: p.price,
-      stock: p.stockQuantity,
-      status: p.stockQuantity === 0 ? 'Out of stock' : 'Low stock',
-      image: p.image,
-    }));
-
-    // Weekly sales trend (last 7 days)
-    const daysMap: { [key: string]: number } = {};
-    const today = new Date();
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date(today.getTime() - i * 24 * 60 * 60 * 1000);
-      const key = d.toLocaleDateString('en-US', { weekday: 'short' });
-      daysMap[key] = 0;
-    }
-    for (const o of orders) {
-      const created = (o as any).createdAt ? new Date((o as any).createdAt) : null;
-      if (created) {
-        const dayKey = created.toLocaleDateString('en-US', { weekday: 'short' });
-        if (daysMap[dayKey] !== undefined) {
-          daysMap[dayKey] += o.total || 0;
-        }
+    for (const order of periodOrders) {
+      const index = Math.floor(
+        (new Date((order as any).createdAt).getTime() - periodStart.getTime()) / (bucketDays * DAY_MS),
+      );
+      if (buckets[index]) {
+        buckets[index].amount += order.total || 0;
+        buckets[index].orders += 1;
       }
     }
-    const salesTrend = Object.entries(daysMap).map(([day, amount]) => ({
-      day,
-      amount,
-    }));
 
     return {
+      period: { days, start: periodStart, end: now },
       metrics: {
-        totalRevenue,
-        totalOrders,
-        averageOrderValue,
+        revenue,
+        revenueChange: percentChange(revenue, previousRevenue),
+        orders: orderCount,
+        ordersChange: percentChange(orderCount, previousOrders.length),
+        averageOrderValue: orderCount ? Math.round(revenue / orderCount) : 0,
         totalCustomers,
+        newCustomers,
+        newCustomersChange: percentChange(newCustomers, previousNewCustomers),
         totalProducts,
+        lifetimeRevenue: lifetime?.revenue || 0,
+        lifetimeOrders: lifetime?.orders || 0,
       },
-      lowStockAlerts,
-      recentOrders,
-      salesTrend,
+      attention: {
+        pendingReviews,
+        newMessages,
+        openOrders,
+        lowStock: lowStockProducts.length,
+      },
+      lowStockAlerts: lowStockProducts.map((p) => ({
+        id: p._id.toString(),
+        slug: p.slug,
+        name: p.name,
+        sku: p.sku,
+        stock: p.stockQuantity,
+        image: p.image,
+        status: p.stockQuantity === 0 ? 'Out of stock' : 'Low stock',
+      })),
+      recentOrders: recentOrdersRaw.map((o) => ({
+        id: o.orderId,
+        customer: o.customer?.fullName || 'Guest',
+        email: o.customer?.email || '',
+        createdAt: (o as any).createdAt,
+        amount: o.total,
+        payment: o.payment?.status || 'pending',
+        paymentMethod: o.payment?.method,
+        status: o.status,
+      })),
+      salesTrend: buckets.map(({ label, amount, orders }) => ({ label, amount, orders })),
     };
   }
 
-  // 2. Create Product
-  async createProduct(dto: AdminCreateProductDto) {
-    const cleanSlug = slugify.default ? slugify.default(dto.name, { lower: true, strict: true }) : (slugify as any)(dto.name, { lower: true, strict: true });
-    let finalSlug = cleanSlug;
+  // ---------------------------------------------------------------------------
+  // Products
+  // ---------------------------------------------------------------------------
 
-    const existing = await this.productModel.findOne({ slug: finalSlug }).exec();
-    if (existing) {
-      finalSlug = `${cleanSlug}-${Date.now().toString().slice(-4)}`;
+  async getProducts(search?: string, category?: string, status?: string) {
+    const filter: Record<string, any> = {};
+    if (category && category !== 'all') filter.category = category;
+    if (status === 'active') filter.isActive = { $ne: false };
+    if (status === 'hidden') filter.isActive = false;
+    if (search?.trim()) {
+      const rx = containsMatch(search);
+      filter.$or = [{ name: rx }, { sku: rx }, { slug: rx }];
     }
+    return this.productModel.find(filter).sort({ createdAt: -1 }).lean().exec();
+  }
 
-    const availability = dto.stockQuantity > 0 ? 'in-stock' : 'out-of-stock';
-
-    const product = new this.productModel({
-      ...dto,
-      slug: finalSlug,
-      availability,
-      rating: 5.0,
-      reviews: 0,
-      gallery: dto.gallery && dto.gallery.length > 0 ? dto.gallery : [dto.image],
-      availableColors: dto.availableColors || ['Gold'],
-      availableSizes: dto.availableSizes || ['Standard (16" + 2")'],
-      customerReviews: [],
-    });
-
-    await product.save();
+  async getProduct(id: string) {
+    const product = await this.productModel.findOne(idOrField(id, 'slug')).exec();
+    if (!product) throw new NotFoundException(`Product '${id}' was not found.`);
     return product;
   }
 
-  // 3. Update Product
-  async updateProduct(id: string, dto: AdminUpdateProductDto) {
-    const trimmedId = (id || '').trim();
-    const query: any = Types.ObjectId.isValid(trimmedId)
-      ? { $or: [{ _id: new Types.ObjectId(trimmedId) }, { slug: trimmedId }] }
-      : { slug: trimmedId };
+  private async assertCategoryExists(slug: string) {
+    if (!(await this.categoryModel.exists({ slug }))) {
+      throw new BadRequestException(`Category '${slug}' does not exist. Create it under Categories first.`);
+    }
+  }
 
-    const product = await this.productModel.findOne(query).exec();
-    if (!product) {
-      throw new NotFoundException(`Product '${id}' was not found.`);
+  async createProduct(dto: AdminCreateProductDto) {
+    const category = dto.category.toLowerCase().trim();
+    await this.assertCategoryExists(category);
+
+    const baseSlug = toSlug(dto.name);
+    let slug = baseSlug;
+    for (let n = 2; await this.productModel.exists({ slug }); n++) {
+      slug = `${baseSlug}-${n}`;
     }
 
-    // Apply updates
-    Object.assign(product, dto);
+    const { oldPrice, badge, ...rest } = dto;
+    const product = await this.productModel.create({
+      ...rest,
+      category,
+      slug,
+      sku: dto.sku?.trim() || `LC-${category.slice(0, 3).toUpperCase()}-${Date.now().toString().slice(-5)}`,
+      oldPrice: oldPrice ?? undefined,
+      badge: badge?.trim() || undefined,
+      availability: dto.stockQuantity > 0 ? 'in-stock' : 'out-of-stock',
+      rating: 0,
+      reviews: 0,
+      salesCount: 0,
+      gallery: dto.gallery?.length ? dto.gallery : [dto.image],
+      availableColors: dto.availableColors?.length ? dto.availableColors : ['Gold'],
+      availableSizes: dto.availableSizes?.length ? dto.availableSizes : ['Standard'],
+    });
 
-    if (dto.stockQuantity !== undefined) {
+    return product;
+  }
+
+  async updateProduct(id: string, dto: AdminUpdateProductDto) {
+    const product = await this.getProduct(id);
+
+    if (dto.category) {
+      dto.category = dto.category.toLowerCase().trim();
+      await this.assertCategoryExists(dto.category);
+    }
+
+    const { oldPrice, badge, ...rest } = dto;
+    Object.assign(product, rest);
+
+    if (oldPrice === null) product.set('oldPrice', undefined);
+    else if (oldPrice !== undefined) product.oldPrice = oldPrice;
+
+    if (badge !== undefined) product.set('badge', badge.trim() || undefined);
+
+    if (dto.stockQuantity !== undefined && dto.availability === undefined) {
       product.availability = dto.stockQuantity > 0 ? 'in-stock' : 'out-of-stock';
     }
 
@@ -176,157 +282,424 @@ export class AdminService {
     return product;
   }
 
-  // 4. Delete Product
   async deleteProduct(id: string) {
-    const trimmedId = (id || '').trim();
-    const query: any = Types.ObjectId.isValid(trimmedId)
-      ? { $or: [{ _id: new Types.ObjectId(trimmedId) }, { slug: trimmedId }] }
-      : { slug: trimmedId };
+    const product = await this.getProduct(id);
 
-    const deleted = await this.productModel.findOneAndDelete(query).exec();
-    if (!deleted) {
-      throw new NotFoundException(`Product '${id}' not found for deletion.`);
-    }
+    await Promise.all([
+      product.deleteOne(),
+      this.cartModel.updateMany({}, { $pull: { items: { product: product._id } } }).exec(),
+      this.userModel.updateMany({}, { $pull: { wishlist: product._id } }).exec(),
+      this.reviewModel.deleteMany({ product: product._id }).exec(),
+    ]);
 
     return {
       success: true,
-      message: `Product '${deleted.name}' was successfully removed from the catalog.`,
-      productId: deleted._id.toString(),
+      message: `Product '${product.name}' was removed from the catalog. Past orders keep their snapshot.`,
+      productId: product._id.toString(),
     };
   }
 
-  // 5. List Orders with Filtering
+  // ---------------------------------------------------------------------------
+  // Orders
+  // ---------------------------------------------------------------------------
+
   async getOrders(dto: AdminFilterOrdersDto) {
-    const filter: any = {};
+    const filter: Record<string, any> = {};
 
-    if (dto.status && dto.status !== 'All statuses' && dto.status.toLowerCase() !== 'all') {
-      const normalizedStatus = dto.status.trim();
-      if (normalizedStatus.toLowerCase() === 'shipped') {
-        filter.$or = [{ status: 'In Transit' }, { status: 'Shipped' }];
-      } else {
-        filter.status = new RegExp(`^${normalizedStatus}$`, 'i');
-      }
+    if (dto.status && !['all', 'all statuses'].includes(dto.status.toLowerCase())) {
+      filter.status = dto.status.toLowerCase() === 'shipped' ? 'In Transit' : exactMatch(dto.status);
     }
-
-    if (dto.search && dto.search.trim()) {
-      const searchRegex = new RegExp(dto.search.trim(), 'i');
+    if (dto.paymentStatus && dto.paymentStatus !== 'all') {
+      filter['payment.status'] = dto.paymentStatus;
+    }
+    if (dto.search?.trim()) {
+      const rx = containsMatch(dto.search);
       filter.$or = [
-        { orderId: searchRegex },
-        { 'customer.fullName': searchRegex },
-        { 'customer.email': searchRegex },
-        { 'customer.phone': searchRegex },
+        { orderId: rx },
+        { 'customer.fullName': rx },
+        { 'customer.email': rx },
+        { 'customer.phone': rx },
       ];
     }
 
-    const currentPage = Math.max(1, Number(dto.page || 1));
-    const currentLimit = Math.max(1, Number(dto.limit || 20));
-    const skip = (currentPage - 1) * currentLimit;
+    const page = Math.max(1, Number(dto.page || 1));
+    const limit = Math.min(200, Math.max(1, Number(dto.limit || 50)));
 
-    const [orders, total] = await Promise.all([
+    const [orders, total, statusCounts] = await Promise.all([
       this.orderModel
         .find(filter)
         .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(currentLimit)
+        .skip((page - 1) * limit)
+        .limit(limit)
         .exec(),
       this.orderModel.countDocuments(filter).exec(),
+      this.orderModel.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]).exec(),
     ]);
 
     return {
       orders,
       total,
-      page: currentPage,
-      limit: currentLimit,
-      totalPages: Math.ceil(total / currentLimit) || 1,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+      statusCounts: Object.fromEntries(statusCounts.map((s: any) => [s._id, s.count])),
     };
   }
 
-  // 6. Transition Order Status
+  private async findOrder(id: string) {
+    const trimmed = (id || '').trim();
+    const order = await this.orderModel
+      .findOne(
+        Types.ObjectId.isValid(trimmed)
+          ? { $or: [{ _id: new Types.ObjectId(trimmed) }, { orderId: exactMatch(trimmed) }] }
+          : { orderId: exactMatch(trimmed) },
+      )
+      .exec();
+    if (!order) throw new NotFoundException(`Order '${id}' not found.`);
+    return order;
+  }
+
+  async getOrder(id: string) {
+    const order = await this.findOrder(id);
+    const payment = await this.paymentModel.findOne({ orderId: order.orderId }).lean().exec();
+    return { order, payment };
+  }
+
+  private async setPaymentStatus(order: OrderDocument, status: string) {
+    const paidAt = status === 'paid' ? order.payment?.paidAt || new Date() : order.payment?.paidAt;
+    order.payment = { ...order.payment, status, paidAt };
+    order.markModified('payment');
+    await this.paymentModel.updateOne(
+      { orderId: order.orderId },
+      {
+        $set: { status, paidAt },
+        $setOnInsert: {
+          order: order._id,
+          orderId: order.orderId,
+          user: order.user,
+          amount: order.total,
+          method: order.payment?.method || 'cod',
+        },
+      },
+      { upsert: true },
+    );
+  }
+
   async updateOrderStatus(id: string, dto: UpdateOrderStatusDto) {
-    const trimmedId = (id || '').trim();
-    const query: any = Types.ObjectId.isValid(trimmedId)
-      ? { $or: [{ _id: new Types.ObjectId(trimmedId) }, { orderId: new RegExp(`^${trimmedId}$`, 'i') }] }
-      : { orderId: new RegExp(`^${trimmedId}$`, 'i') };
+    const order = await this.findOrder(id);
+    const targetStatus = dto.status.trim().toLowerCase() === 'shipped' ? 'In Transit' : dto.status.trim();
 
-    const order = await this.orderModel.findOne(query).exec();
-    if (!order) {
-      throw new NotFoundException(`Order '${id}' not found.`);
+    if (order.status === 'Cancelled' && targetStatus !== 'Cancelled') {
+      throw new BadRequestException('Cancelled orders cannot be reopened. Ask the customer to place a new order.');
     }
 
-    let targetStatus = dto.status.trim();
-    if (targetStatus.toLowerCase() === 'shipped') {
-      targetStatus = 'In Transit';
-    }
-
+    const statusChanged = order.status !== targetStatus;
     order.status = targetStatus;
 
-    if (dto.trackingNumber) {
-      order.trackingNumber = dto.trackingNumber.trim();
-    } else if (targetStatus === 'In Transit' && !order.trackingNumber) {
-      order.trackingNumber = 'BD-' + Math.floor(100000000 + Math.random() * 900000000);
+    if (dto.trackingNumber !== undefined) order.trackingNumber = dto.trackingNumber.trim();
+    if (dto.carrier) order.carrier = dto.carrier.trim();
+
+    // Return stock to inventory once when an order is cancelled.
+    if (targetStatus === 'Cancelled' && !order.stockRestored) {
+      for (const item of order.items) {
+        if (!Types.ObjectId.isValid(item.productId)) continue;
+        await this.productModel
+          .updateOne(
+            { _id: new Types.ObjectId(item.productId) },
+            {
+              $inc: { stockQuantity: item.quantity, salesCount: -item.quantity },
+              $set: { availability: 'in-stock' },
+            },
+          )
+          .exec();
+      }
+      order.stockRestored = true;
     }
 
-    if (dto.carrier) {
-      order.carrier = dto.carrier.trim();
-    }
-
-    // When status reaches Delivered, if COD was pending, mark payment paid
+    // Cash on delivery is collected when the parcel is delivered.
     if (targetStatus === 'Delivered' && order.payment?.method === 'cod' && order.payment.status === 'pending') {
-      order.payment.status = 'paid';
-      order.payment.paidAt = new Date();
+      await this.setPaymentStatus(order, 'paid');
+    }
+
+    if (statusChanged || dto.note) {
+      order.statusHistory = [
+        ...(order.statusHistory || []),
+        { status: targetStatus, note: dto.note?.trim() || undefined, at: new Date() },
+      ];
     }
 
     await order.save();
 
     return {
       success: true,
-      message: `Order ${order.orderId} status transitioned to '${order.status}'.`,
+      message: `Order ${order.orderId} is now '${order.status}'.`,
       order,
     };
   }
 
-  // 7. Create Discount Coupon
-  async createDiscount(dto: AdminCreateDiscountDto) {
-    const normalizedCode = dto.code.trim().toUpperCase();
+  async updatePaymentStatus(id: string, status: string) {
+    const order = await this.findOrder(id);
+    await this.setPaymentStatus(order, status);
+    order.statusHistory = [
+      ...(order.statusHistory || []),
+      { status: order.status, note: `Payment marked ${status}`, at: new Date() },
+    ];
+    await order.save();
+    return { success: true, message: `Payment for ${order.orderId} marked ${status}.`, order };
+  }
 
-    const existing = await this.couponModel.findOne({ code: normalizedCode }).exec();
-    if (existing) {
-      throw new ConflictException(`Coupon code '${normalizedCode}' already exists.`);
+  // ---------------------------------------------------------------------------
+  // Discounts
+  // ---------------------------------------------------------------------------
+
+  async createDiscount(dto: AdminCreateDiscountDto) {
+    const code = dto.code.trim().toUpperCase();
+    if (await this.couponModel.exists({ code })) {
+      throw new ConflictException(`Coupon code '${code}' already exists.`);
     }
 
-    const coupon = new this.couponModel({
-      code: normalizedCode,
-      type: dto.type,
-      value: dto.value,
-      minOrderAmount: dto.minOrderAmount || 0,
-      isActive: dto.isActive !== undefined ? dto.isActive : true,
+    return this.couponModel.create({
+      ...dto,
+      code,
       expiresAt: dto.expiresAt ? new Date(dto.expiresAt) : undefined,
     });
+  }
+
+  getDiscounts() {
+    return this.couponModel.find().sort({ createdAt: -1 }).exec();
+  }
+
+  async updateDiscount(id: string, dto: AdminUpdateDiscountDto) {
+    const coupon = await this.couponModel
+      .findOne(idOrField(id, 'code', (id || '').trim().toUpperCase()))
+      .exec();
+    if (!coupon) throw new NotFoundException(`Coupon '${id}' not found.`);
+
+    const { expiresAt, code, ...rest } = dto;
+    if (code && code.toUpperCase() !== coupon.code) {
+      if (await this.couponModel.exists({ code: code.toUpperCase() })) {
+        throw new ConflictException(`Coupon code '${code.toUpperCase()}' already exists.`);
+      }
+      coupon.code = code.toUpperCase();
+    }
+    Object.assign(coupon, rest);
+    if (expiresAt === null || expiresAt === '') coupon.set('expiresAt', undefined);
+    else if (expiresAt) coupon.expiresAt = new Date(expiresAt);
 
     await coupon.save();
     return coupon;
   }
 
-  // 8. List Discounts
-  async getDiscounts() {
-    return this.couponModel.find().sort({ createdAt: -1 }).exec();
+  async deleteDiscount(id: string) {
+    const deleted = await this.couponModel
+      .findOneAndDelete(idOrField(id, 'code', (id || '').trim().toUpperCase()))
+      .exec();
+    if (!deleted) throw new NotFoundException(`Coupon '${id}' not found.`);
+    return { success: true, message: `Coupon '${deleted.code}' deleted.` };
   }
 
-  // 9. Delete Discount
-  async deleteDiscount(id: string) {
-    const trimmedId = (id || '').trim();
-    const query: any = Types.ObjectId.isValid(trimmedId)
-      ? { $or: [{ _id: new Types.ObjectId(trimmedId) }, { code: trimmedId.toUpperCase() }] }
-      : { code: trimmedId.toUpperCase() };
+  // ---------------------------------------------------------------------------
+  // Customers & staff accounts
+  // ---------------------------------------------------------------------------
 
-    const deleted = await this.couponModel.findOneAndDelete(query).exec();
-    if (!deleted) {
-      throw new NotFoundException(`Coupon '${id}' not found for deletion.`);
+  async getCustomers(dto: AdminFilterCustomersDto) {
+    const filter: Record<string, any> = {};
+    if (dto.role && dto.role !== 'all') filter.role = dto.role;
+    if (dto.status === 'active') filter.isActive = { $ne: false };
+    if (dto.status === 'inactive') filter.isActive = false;
+    if (dto.search?.trim()) {
+      const rx = containsMatch(dto.search);
+      filter.$or = [{ name: rx }, { email: rx }, { phone: rx }];
     }
 
+    const page = Math.max(1, Number(dto.page || 1));
+    const limit = Math.min(200, Math.max(1, Number(dto.limit || 50)));
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+
+    const [users, total, orderStats, totalCustomers, newThisMonth, [buyerStats]] = await Promise.all([
+      this.userModel
+        .find(filter)
+        .select(PRIVATE_USER_FIELDS)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean()
+        .exec(),
+      this.userModel.countDocuments(filter).exec(),
+      this.orderModel
+        .aggregate([
+          { $match: { user: { $ne: null } } },
+          {
+            $group: {
+              _id: '$user',
+              orders: { $sum: 1 },
+              spent: { $sum: { $cond: [{ $ne: ['$status', 'Cancelled'] }, '$total', 0] } },
+              lastOrderAt: { $max: '$createdAt' },
+            },
+          },
+        ])
+        .exec(),
+      this.userModel.countDocuments({ role: 'customer' }).exec(),
+      this.userModel.countDocuments({ role: 'customer', createdAt: { $gte: monthStart } }).exec(),
+      this.orderModel
+        .aggregate([
+          { $match: { user: { $ne: null }, status: { $ne: 'Cancelled' } } },
+          { $group: { _id: '$user', orders: { $sum: 1 }, spent: { $sum: '$total' } } },
+          {
+            $group: {
+              _id: null,
+              buyers: { $sum: 1 },
+              returning: { $sum: { $cond: [{ $gte: ['$orders', 2] }, 1, 0] } },
+              revenue: { $sum: '$spent' },
+              orders: { $sum: '$orders' },
+            },
+          },
+        ])
+        .exec(),
+    ]);
+
+    const statsByUser = new Map(orderStats.map((s: any) => [s._id.toString(), s]));
+
+    return {
+      customers: users.map((u) => {
+        const stats: any = statsByUser.get(u._id.toString());
+        return {
+          ...u,
+          id: u._id,
+          wishlistCount: u.wishlist?.length || 0,
+          wishlist: undefined,
+          orders: stats?.orders || 0,
+          spent: stats?.spent || 0,
+          lastOrderAt: stats?.lastOrderAt || null,
+        };
+      }),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit) || 1,
+      summary: {
+        totalCustomers,
+        newThisMonth,
+        returningRate: buyerStats?.buyers ? Math.round((buyerStats.returning / buyerStats.buyers) * 100) : 0,
+        averageOrderValue: buyerStats?.orders ? Math.round(buyerStats.revenue / buyerStats.orders) : 0,
+      },
+    };
+  }
+
+  async getCustomer(id: string) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Customer not found.');
+    const user = await this.userModel
+      .findById(id)
+      .select(PRIVATE_USER_FIELDS)
+      .populate('wishlist', 'name slug image price')
+      .lean()
+      .exec();
+    if (!user) throw new NotFoundException('Customer not found.');
+
+    const orders = await this.orderModel
+      .find({ $or: [{ user: user._id }, { 'customer.email': user.email }] })
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean()
+      .exec();
+
+    return { user, orders };
+  }
+
+  async createUser(dto: AdminCreateUserDto) {
+    const email = dto.email.toLowerCase().trim();
+    if (await this.userModel.exists({ email })) {
+      throw new ConflictException('An account with this email address already exists.');
+    }
+
+    const user = await this.userModel.create({
+      name: dto.name.trim(),
+      email,
+      phone: dto.phone?.trim(),
+      role: dto.role || 'customer',
+      password: await bcrypt.hash(dto.password, 10),
+    });
+
+    const { password, ...safe } = user.toObject();
+    return safe;
+  }
+
+  private async assertNotLastAdmin(user: UserDocument) {
+    if (user.role !== 'admin') return;
+    const otherAdmins = await this.userModel
+      .countDocuments({ role: 'admin', isActive: { $ne: false }, _id: { $ne: user._id } })
+      .exec();
+    if (otherAdmins === 0) {
+      throw new BadRequestException('At least one active administrator account must remain.');
+    }
+  }
+
+  async updateUser(id: string, dto: AdminUpdateUserDto, actingAdminId: string) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Customer not found.');
+    const user = await this.userModel.findById(id).exec();
+    if (!user) throw new NotFoundException('Customer not found.');
+
+    const isSelf = user._id.toString() === actingAdminId.toString();
+    const demoting = dto.role === 'customer' && user.role === 'admin';
+    const deactivating = dto.isActive === false && user.isActive !== false;
+
+    if (isSelf && (demoting || deactivating)) {
+      throw new BadRequestException('You cannot remove your own admin access or deactivate your own account.');
+    }
+    if (demoting || deactivating) {
+      await this.assertNotLastAdmin(user);
+    }
+
+    if (dto.name !== undefined) user.name = dto.name.trim();
+    if (dto.phone !== undefined) user.phone = dto.phone.trim();
+    if (dto.role !== undefined) user.role = dto.role;
+    if (dto.isActive !== undefined) user.isActive = dto.isActive;
+    if (dto.password) user.password = await bcrypt.hash(dto.password, 10);
+
+    await user.save();
+    const { password, resetPasswordTokenHash, resetPasswordExpires, ...safe } = user.toObject();
+    return safe;
+  }
+
+  async deleteUser(id: string, actingAdminId: string) {
+    if (!Types.ObjectId.isValid(id)) throw new NotFoundException('Customer not found.');
+    const user = await this.userModel.findById(id).exec();
+    if (!user) throw new NotFoundException('Customer not found.');
+
+    if (user._id.toString() === actingAdminId.toString()) {
+      throw new BadRequestException('You cannot delete your own account.');
+    }
+    await this.assertNotLastAdmin(user);
+
+    await Promise.all([user.deleteOne(), this.cartModel.deleteOne({ user: user._id }).exec()]);
     return {
       success: true,
-      message: `Coupon '${deleted.code}' deleted successfully.`,
+      message: `Account '${user.email}' deleted. Their past orders are kept for your records.`,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Payments ledger
+  // ---------------------------------------------------------------------------
+
+  async getPayments(dto: AdminFilterPaymentsDto) {
+    const filter: Record<string, any> = {};
+    if (dto.status && dto.status !== 'all') filter.status = dto.status;
+    if (dto.search?.trim()) {
+      const rx = containsMatch(dto.search);
+      filter.$or = [{ orderId: rx }, { transactionId: rx }, { razorpayPaymentId: rx }];
+    }
+
+    const [payments, summary] = await Promise.all([
+      this.paymentModel.find(filter).sort({ createdAt: -1 }).limit(500).lean().exec(),
+      this.paymentModel
+        .aggregate([{ $group: { _id: '$status', count: { $sum: 1 }, amount: { $sum: '$amount' } } }])
+        .exec(),
+    ]);
+
+    return {
+      payments,
+      summary: Object.fromEntries(summary.map((s: any) => [s._id, { count: s.count, amount: s.amount }])),
     };
   }
 }

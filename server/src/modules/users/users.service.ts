@@ -1,9 +1,11 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { User, UserDocument, Address } from './schemas/user.schema.js';
+import * as bcrypt from 'bcryptjs';
+import { User, UserDocument, Address, PRIVATE_USER_FIELDS } from './schemas/user.schema.js';
 import { UpdateProfileDto } from './dto/update-profile.dto.js';
 import { CreateAddressDto } from './dto/create-address.dto.js';
+import { ChangePasswordDto } from './dto/change-password.dto.js';
 
 @Injectable()
 export class UsersService {
@@ -28,7 +30,7 @@ export class UsersService {
   }
 
   async getProfile(userId: string | Types.ObjectId): Promise<UserDocument> {
-    const user = await this.userModel.findById(userId).select('-password');
+    const user = await this.userModel.findById(userId).select(PRIVATE_USER_FIELDS);
     if (!user) {
       throw new NotFoundException('User profile not found.');
     }
@@ -41,11 +43,27 @@ export class UsersService {
   ): Promise<UserDocument> {
     const user = await this.userModel
       .findByIdAndUpdate(userId, { $set: updateDto }, { returnDocument: 'after' })
-      .select('-password');
+      .select(PRIVATE_USER_FIELDS);
     if (!user) {
       throw new NotFoundException('User not found.');
     }
     return user;
+  }
+
+  async changePassword(userId: string | Types.ObjectId, dto: ChangePasswordDto) {
+    const user = await this.userModel.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found.');
+    }
+
+    const matches = await bcrypt.compare(dto.currentPassword, user.password);
+    if (!matches) {
+      throw new BadRequestException('Your current password is incorrect.');
+    }
+
+    user.password = await bcrypt.hash(dto.newPassword, 10);
+    await user.save();
+    return { success: true, message: 'Your password has been updated.' };
   }
 
   async addAddress(
@@ -66,6 +84,24 @@ export class UsersService {
     }
 
     user.addresses.push(dto as Address);
+    await user.save();
+    return user.addresses;
+  }
+
+  async setDefaultAddress(userId: string | Types.ObjectId, addressId: string): Promise<Address[]> {
+    const user = await this.userModel.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found.');
+    }
+
+    const target = user.addresses.find((addr: any) => addr._id?.toString() === addressId);
+    if (!target) {
+      throw new NotFoundException('Address not found.');
+    }
+
+    user.addresses.forEach((addr: any) => {
+      addr.isDefault = addr._id?.toString() === addressId;
+    });
     await user.save();
     return user.addresses;
   }

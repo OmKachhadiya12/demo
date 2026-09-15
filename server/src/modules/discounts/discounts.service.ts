@@ -17,16 +17,20 @@ export class DiscountsService {
 
     const coupon = await this.couponModel.findOne({ code: normalized }).exec();
     if (!coupon || !coupon.isActive) {
-      throw new BadRequestException('Invalid or expired promo code. Try SHINE10 or LUSTRE20.');
+      throw new BadRequestException('This promo code is invalid or no longer active.');
     }
 
     if (coupon.expiresAt && new Date() > new Date(coupon.expiresAt)) {
       throw new BadRequestException(`Promo code ${coupon.code} has expired.`);
     }
 
-    if (coupon.minOrderAmount && subtotal > 0 && subtotal < coupon.minOrderAmount) {
+    if (coupon.usageLimit > 0 && coupon.usedCount >= coupon.usageLimit) {
+      throw new BadRequestException(`Promo code ${coupon.code} has reached its usage limit.`);
+    }
+
+    if (coupon.minOrderAmount && subtotal < coupon.minOrderAmount) {
       throw new BadRequestException(
-        `Code ${coupon.code} requires a minimum order subtotal of ₹${coupon.minOrderAmount}.`,
+        `Code ${coupon.code} requires a minimum order subtotal of ₹${coupon.minOrderAmount.toLocaleString('en-IN')}.`,
       );
     }
 
@@ -41,7 +45,6 @@ export class DiscountsService {
       discountAmount = Math.min(subtotal, coupon.value);
       label = `₹${coupon.value} OFF`;
     } else if (isFreeShipping) {
-      discountAmount = 0;
       label = 'Free Delivery';
     }
 
@@ -50,6 +53,7 @@ export class DiscountsService {
       code: coupon.code,
       rate: coupon.value,
       type: coupon.type,
+      minOrderAmount: coupon.minOrderAmount,
       freeShipping: isFreeShipping,
       discountAmount,
       label,
@@ -57,5 +61,9 @@ export class DiscountsService {
         ? 'Free shipping applied to your order!'
         : `${label} applied successfully!`,
     };
+  }
+
+  async incrementUsage(code: string) {
+    await this.couponModel.updateOne({ code: code.toUpperCase() }, { $inc: { usedCount: 1 } }).exec();
   }
 }

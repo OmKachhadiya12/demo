@@ -1,14 +1,19 @@
-import { IsOptional, IsString } from 'class-validator';
+import { IsIn, IsNumber, IsOptional, IsString } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class AdminFilterOrdersDto {
-  @ApiPropertyOptional({ example: 'Processing', description: 'Filter by order status' })
+  @ApiPropertyOptional({ example: 'Processing', description: 'Order status, or "all"' })
   @IsOptional()
   @IsString()
   status?: string;
 
-  @ApiPropertyOptional({ example: 'Eleanor', description: 'Search customer name, email, or order ID' })
+  @ApiPropertyOptional({ enum: ['all', 'pending', 'paid', 'failed', 'refunded'] })
+  @IsOptional()
+  @IsIn(['all', 'pending', 'paid', 'failed', 'refunded'])
+  paymentStatus?: string;
+
+  @ApiPropertyOptional({ example: 'Eleanor', description: 'Search order ID, customer name, email, or phone' })
   @IsOptional()
   @IsString()
   search?: string;
@@ -16,10 +21,12 @@ export class AdminFilterOrdersDto {
   @ApiPropertyOptional({ example: 1, default: 1 })
   @IsOptional()
   @Type(() => Number)
+  @IsNumber()
   page?: number = 1;
 
-  @ApiPropertyOptional({ example: 20, default: 20 })
+  @ApiPropertyOptional({ example: 50, default: 50 })
   @IsOptional()
   @Type(() => Number)
-  limit?: number = 20;
+  @IsNumber()
+  limit?: number = 50;
 }

@@ -2,12 +2,9 @@ import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ArrowRight,
-  Check,
   CheckCircle2,
   Clock,
-  CreditCard,
   Facebook,
-  Heart,
   Instagram,
   Lock,
   Mail,
@@ -21,178 +18,166 @@ import {
   Youtube
 } from "lucide-react";
 import { useStore } from "../context/StoreContext";
+import { useSettings } from "../context/SettingsContext";
+import { formatPrice } from "../data/products";
+import api, { getErrorMessage } from "../services/api";
 
 export default function Footer() {
   const { showToast } = useStore();
+  const { settings, categories } = useSettings();
+  const { store, social, commerce, newsletter, payments } = settings;
+
   const [email, setEmail] = useState("");
   const [subscribed, setSubscribed] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [copiedCode, setCopiedCode] = useState(false);
 
-  function handleSubscribe(e) {
-    e.preventDefault();
+  async function handleSubscribe(event) {
+    event.preventDefault();
     if (!email.trim()) return;
-
-    setSubscribed(true);
-    if (showToast) {
-      showToast("Welcome to Lustre & Co.! Use code SHINE10 for 10% off.", "success");
+    setSubmitting(true);
+    try {
+      await api.post("/newsletter/subscribe", { email: email.trim(), source: "footer" });
+      setSubscribed(true);
+    } catch (err) {
+      showToast(getErrorMessage(err, "Could not subscribe right now."), "error");
+    } finally {
+      setSubmitting(false);
     }
   }
 
   function handleCopyPromo() {
-    if (navigator.clipboard) {
-      navigator.clipboard.writeText("SHINE10");
+    if (navigator.clipboard && newsletter.couponCode) {
+      navigator.clipboard.writeText(newsletter.couponCode);
       setCopiedCode(true);
-      if (showToast) {
-        showToast("Coupon code SHINE10 copied to clipboard!", "success");
-      }
+      showToast(`Coupon code ${newsletter.couponCode} copied to clipboard!`, "success");
       setTimeout(() => setCopiedCode(false), 3000);
     }
   }
 
+  const socialLinks = [
+    [social.instagram, Instagram, "Instagram"],
+    [social.facebook, Facebook, "Facebook"],
+    [social.youtube, Youtube, "YouTube"],
+    [social.whatsapp, MessageCircle, "WhatsApp"]
+  ].filter(([href]) => href);
+
+  const year = new Date().getFullYear();
+
   return (
     <footer className="luxury-footer" role="contentinfo">
-      {/* 1. Newsletter Ribbon Section */}
-      <div className="footer-newsletter-section">
-        <div className="footer-container">
-          <div className="footer-newsletter-card">
-            <div className="newsletter-glow" aria-hidden="true" />
+      {newsletter.enabled && (
+        <div className="footer-newsletter-section">
+          <div className="footer-container">
+            <div className="footer-newsletter-card">
+              <div className="newsletter-glow" aria-hidden="true" />
 
-            <div className="newsletter-text-col">
-              <span className="newsletter-kicker">
-                <Sparkles size={13} />
-                THE LUSTRE CLUB
-              </span>
-              <h2 className="newsletter-heading">
-                Get <em>10% Off</em> Your First Order
-              </h2>
-              <p className="newsletter-description">
-                Subscribe to receive early access to new jewelry drops, seasonal styling
-                edits, and private VIP member events.
-              </p>
+              <div className="newsletter-text-col">
+                <span className="newsletter-kicker">
+                  <Sparkles size={13} />
+                  {newsletter.kicker}
+                </span>
+                <h2 className="newsletter-heading">{newsletter.heading}</h2>
+                <p className="newsletter-description">{newsletter.description}</p>
+              </div>
+
+              <div className="newsletter-form-col">
+                {!subscribed ? (
+                  <form className="newsletter-form" onSubmit={handleSubscribe}>
+                    <div className="newsletter-input-group">
+                      <Mail size={18} className="newsletter-mail-icon" />
+                      <input
+                        type="email"
+                        required
+                        placeholder="Enter your email address"
+                        value={email}
+                        onChange={(event) => setEmail(event.target.value)}
+                        aria-label="Email address for newsletter"
+                      />
+                      <button type="submit" className="newsletter-submit-btn" disabled={submitting}>
+                        <span>{submitting ? "Joining…" : "Subscribe"}</span>
+                        <ArrowRight size={15} />
+                      </button>
+                    </div>
+                    <span className="newsletter-disclaimer">
+                      By signing up, you agree to our{" "}
+                      <Link to="/privacy" className="footer-inline-link">
+                        Privacy Policy
+                      </Link>
+                      . Unsubscribe anytime.
+                    </span>
+                  </form>
+                ) : (
+                  <div className="newsletter-success-box">
+                    <div className="success-icon-wrap">
+                      <CheckCircle2 size={24} />
+                    </div>
+                    <div className="success-text">
+                      <strong>You’re on the list!</strong>
+                      {newsletter.couponCode ? (
+                        <p>
+                          Use code{" "}
+                          <button
+                            type="button"
+                            className="promo-copy-tag"
+                            onClick={handleCopyPromo}
+                            title="Click to copy promo code"
+                          >
+                            {newsletter.couponCode} {copiedCode ? "✓ Copied" : "Copy"}
+                          </button>{" "}
+                          at checkout.
+                        </p>
+                      ) : (
+                        <p>Thanks for subscribing.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
+          </div>
+        </div>
+      )}
 
-            <div className="newsletter-form-col">
-              {!subscribed ? (
-                <form className="newsletter-form" onSubmit={handleSubscribe} noValidate>
-                  <div className="newsletter-input-group">
-                    <Mail size={18} className="newsletter-mail-icon" />
-                    <input
-                      type="email"
-                      required
-                      placeholder="Enter your email address"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      aria-label="Email address for 10% discount newsletter"
-                    />
-                    <button type="submit" className="newsletter-submit-btn">
-                      <span>Claim 10% Off</span>
-                      <ArrowRight size={15} />
-                    </button>
-                  </div>
-                  <span className="newsletter-disclaimer">
-                    By signing up, you agree to our{" "}
-                    <Link to="/privacy" className="footer-inline-link">
-                      Privacy Policy
-                    </Link>
-                    . Unsubscribe anytime.
-                  </span>
-                </form>
-              ) : (
-                <div className="newsletter-success-box">
-                  <div className="success-icon-wrap">
-                    <CheckCircle2 size={24} />
-                  </div>
-                  <div className="success-text">
-                    <strong>You’re on the VIP list!</strong>
-                    <p>
-                      Use code{" "}
-                      <button
-                        type="button"
-                        className="promo-copy-tag"
-                        onClick={handleCopyPromo}
-                        title="Click to copy promo code"
+      <div className="footer-main-section">
+        <div className="footer-container">
+          <div className="footer-columns-grid">
+            <div className="footer-col footer-col-brand">
+              <Link to="/" className="footer-brand-logo" aria-label={`${store.name} home`}>
+                {store.name.includes("&") ? (
+                  <>
+                    <span className="logo-word">{store.name.split("&")[0].trim()}</span>
+                    <span className="logo-amp">&amp;</span>
+                    <span className="logo-word">{store.name.split("&")[1].trim()}</span>
+                  </>
+                ) : (
+                  <span className="logo-word">{store.name}</span>
+                )}
+              </Link>
+
+              <p className="footer-brand-bio">{store.description}</p>
+
+              {socialLinks.length > 0 && (
+                <div className="footer-social-wrapper">
+                  <span className="social-label">Follow Our Journey</span>
+                  <div className="footer-social-links">
+                    {socialLinks.map(([href, Icon, label]) => (
+                      <a
+                        key={label}
+                        href={href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        aria-label={`${store.name} on ${label}`}
+                        className="social-icon-btn"
                       >
-                        SHINE10 {copiedCode ? "✓ Copied" : "📋 Copy"}
-                      </button>{" "}
-                      at checkout for 10% off.
-                    </p>
+                        <Icon size={17} />
+                      </a>
+                    ))}
                   </div>
                 </div>
               )}
             </div>
-          </div>
-        </div>
-      </div>
 
-      {/* 2. Main Footer Links & Information Grid */}
-      <div className="footer-main-section">
-        <div className="footer-container">
-          <div className="footer-columns-grid">
-            {/* Column 1: Brand Logo, Description & Socials */}
-            <div className="footer-col footer-col-brand">
-              <Link to="/" className="footer-brand-logo" aria-label="Lustre and Co. Home">
-                <span className="logo-word">Lustre</span>
-                <span className="logo-amp">&amp;</span>
-                <span className="logo-word">Co.</span>
-              </Link>
-
-              <p className="footer-brand-bio">
-                Modern imitation jewelry crafted for everyday elegance, memorable celebrations,
-                and timeless gifting. Designed with hypoallergenic materials, 18K gold tones,
-                and enduring brilliance.
-              </p>
-
-              <div className="footer-badges-pill">
-                <span>✦ Skin-Friendly</span>
-                <span>✦ Anti-Tarnish</span>
-                <span>✦ Nickel-Free</span>
-              </div>
-
-              {/* Social Media Icons */}
-              <div className="footer-social-wrapper">
-                <span className="social-label">Follow Our Journey</span>
-                <div className="footer-social-links">
-                  <a
-                    href="https://instagram.com"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label="Follow Lustre & Co. on Instagram"
-                    className="social-icon-btn"
-                  >
-                    <Instagram size={17} />
-                  </a>
-                  <a
-                    href="https://facebook.com"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label="Follow Lustre & Co. on Facebook"
-                    className="social-icon-btn"
-                  >
-                    <Facebook size={17} />
-                  </a>
-                  <a
-                    href="https://youtube.com"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label="Watch Lustre & Co. on YouTube"
-                    className="social-icon-btn"
-                  >
-                    <Youtube size={17} />
-                  </a>
-                  <a
-                    href="https://wa.me"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label="Chat with Lustre & Co. on WhatsApp"
-                    className="social-icon-btn"
-                  >
-                    <MessageCircle size={17} />
-                  </a>
-                </div>
-              </div>
-            </div>
-
-            {/* Column 2: Shopping Links */}
             <div className="footer-col">
               <h3 className="footer-col-title">Shopping</h3>
               <ul className="footer-links-list">
@@ -205,18 +190,11 @@ export default function Footer() {
                 <li>
                   <Link to="/best-sellers">Best Sellers</Link>
                 </li>
-                <li>
-                  <Link to="/category/necklaces">Necklaces &amp; Pendants</Link>
-                </li>
-                <li>
-                  <Link to="/category/earrings">Earrings &amp; Studs</Link>
-                </li>
-                <li>
-                  <Link to="/category/rings">Solitaire &amp; Eternity Rings</Link>
-                </li>
-                <li>
-                  <Link to="/category/bracelets">Bracelets &amp; Bangles</Link>
-                </li>
+                {categories.map((category) => (
+                  <li key={category.slug}>
+                    <Link to={`/category/${category.slug}`}>{category.name}</Link>
+                  </li>
+                ))}
                 <li>
                   <Link to="/collections/bridal">Bridal &amp; Festive Edit</Link>
                 </li>
@@ -228,7 +206,6 @@ export default function Footer() {
               </ul>
             </div>
 
-            {/* Column 3: Customer Service */}
             <div className="footer-col">
               <h3 className="footer-col-title">Customer Service</h3>
               <ul className="footer-links-list">
@@ -236,10 +213,7 @@ export default function Footer() {
                   <Link to="/track-order">Track Your Order</Link>
                 </li>
                 <li>
-                  <Link to="/shipping-returns">Shipping &amp; Delivery</Link>
-                </li>
-                <li>
-                  <Link to="/shipping-returns#returns">Easy 7-Day Returns</Link>
+                  <Link to="/shipping-returns">Shipping &amp; Returns</Link>
                 </li>
                 <li>
                   <Link to="/jewelry-care">Jewelry Care Guide</Link>
@@ -259,140 +233,114 @@ export default function Footer() {
               </ul>
             </div>
 
-            {/* Column 4: About the Brand */}
             <div className="footer-col">
               <h3 className="footer-col-title">About the Brand</h3>
               <ul className="footer-links-list">
                 <li>
-                  <Link to="/about">Our Story &amp; Heritage</Link>
+                  <Link to="/about">Our Story</Link>
                 </li>
                 <li>
-                  <Link to="/about#materials">Hypoallergenic Metals</Link>
+                  <Link to="/contact">Contact Us</Link>
                 </li>
                 <li>
-                  <Link to="/about#craftsmanship">Artisanal Craftsmanship</Link>
+                  <Link to="/privacy">Privacy Policy</Link>
                 </li>
                 <li>
-                  <Link to="/about#sustainability">Sustainable Packaging</Link>
-                </li>
-                <li>
-                  <Link to="/account">Lustre VIP Rewards</Link>
-                </li>
-                <li>
-                  <Link to="/about#press">Press &amp; Editorial</Link>
-                </li>
-                <li>
-                  <Link to="/contact">Studio Appointments</Link>
+                  <Link to="/terms">Terms &amp; Conditions</Link>
                 </li>
               </ul>
             </div>
 
-            {/* Column 5: Contact Information */}
             <div className="footer-col footer-col-contact">
               <h3 className="footer-col-title">Contact Us</h3>
               <div className="footer-contact-list">
-                <div className="footer-contact-item">
-                  <Mail size={16} className="contact-icon" />
-                  <div>
-                    <span className="contact-sub">Client Concierge</span>
-                    <a href="mailto:concierge@lustreandco.com" className="contact-main">
-                      concierge@lustreandco.com
-                    </a>
+                {store.supportEmail && (
+                  <div className="footer-contact-item">
+                    <Mail size={16} className="contact-icon" />
+                    <div>
+                      <span className="contact-sub">Email</span>
+                      <a href={`mailto:${store.supportEmail}`} className="contact-main">
+                        {store.supportEmail}
+                      </a>
+                    </div>
                   </div>
-                </div>
+                )}
 
-                <div className="footer-contact-item">
-                  <Phone size={16} className="contact-icon" />
-                  <div>
-                    <span className="contact-sub">Phone Support</span>
-                    <a href="tel:+15552345878" className="contact-main">
-                      +1 (555) 234-LUSTRE
-                    </a>
+                {store.supportPhone && (
+                  <div className="footer-contact-item">
+                    <Phone size={16} className="contact-icon" />
+                    <div>
+                      <span className="contact-sub">Phone Support</span>
+                      <a href={`tel:${store.supportPhone.replace(/[^\d+]/g, "")}`} className="contact-main">
+                        {store.supportPhone}
+                      </a>
+                    </div>
                   </div>
-                </div>
+                )}
 
-                <div className="footer-contact-item">
-                  <MapPin size={16} className="contact-icon" />
-                  <div>
-                    <span className="contact-sub">Design Studio</span>
-                    <address className="contact-address">
-                      742 Evergreen Terrace, Suite 4B
-                      <br />
-                      San Francisco, CA 94107
-                    </address>
+                {store.address && (
+                  <div className="footer-contact-item">
+                    <MapPin size={16} className="contact-icon" />
+                    <div>
+                      <span className="contact-sub">Studio</span>
+                      <address className="contact-address">{store.address}</address>
+                    </div>
                   </div>
-                </div>
+                )}
 
-                <div className="footer-contact-item">
-                  <Clock size={16} className="contact-icon" />
-                  <div>
-                    <span className="contact-sub">Concierge Hours</span>
-                    <span className="contact-hours">Mon – Sat: 9:00 AM – 7:00 PM EST</span>
+                {store.hours && (
+                  <div className="footer-contact-item">
+                    <Clock size={16} className="contact-icon" />
+                    <div>
+                      <span className="contact-sub">Support Hours</span>
+                      <span className="contact-hours">{store.hours}</span>
+                    </div>
                   </div>
-                </div>
-
-                <div className="concierge-live-badge">
-                  <span className="live-pulse-dot" />
-                  <span>Concierge Team Online</span>
-                </div>
+                )}
               </div>
             </div>
           </div>
 
-          {/* 3. Payment Methods & Security Trust Row */}
           <div className="footer-trust-row">
             <div className="footer-trust-security">
               <div className="trust-security-badge">
                 <Lock size={15} />
-                <span>256-Bit SSL Encrypted Checkout</span>
+                <span>Secure checkout</span>
               </div>
               <div className="trust-security-badge">
                 <ShieldCheck size={15} />
-                <span>100% Quality Guaranteed</span>
+                <span>Quality checked before dispatch</span>
               </div>
               <div className="trust-security-badge">
                 <Truck size={15} />
-                <span>Free Tracked Delivery over $50</span>
+                <span>Free delivery over {formatPrice(commerce.freeShippingThreshold)}</span>
               </div>
               <div className="trust-security-badge">
                 <RotateCcw size={15} />
-                <span>7-Day Doorstep Returns</span>
+                <span>{commerce.returnWindowDays}-day returns</span>
               </div>
             </div>
 
-            {/* Secure Payment Badges */}
-            <div className="footer-payment-methods" aria-label="Accepted Payment Methods">
-              <div className="payment-badge" title="Visa">
-                <span className="payment-text">VISA</span>
-              </div>
-              <div className="payment-badge" title="Mastercard">
-                <span className="payment-text">Mastercard</span>
-              </div>
-              <div className="payment-badge" title="American Express">
-                <span className="payment-text">AMEX</span>
-              </div>
-              <div className="payment-badge" title="PayPal">
-                <span className="payment-text">PayPal</span>
-              </div>
-              <div className="payment-badge" title="Apple Pay">
-                <span className="payment-text">Apple Pay</span>
-              </div>
-              <div className="payment-badge" title="Google Pay">
-                <span className="payment-text">G Pay</span>
-              </div>
-              <div className="payment-badge" title="UPI & Net Banking">
-                <span className="payment-text">UPI / NetBanking</span>
-              </div>
+            <div className="footer-payment-methods" aria-label="Accepted payment methods">
+              {payments.onlineEnabled && (
+                <div className="payment-badge" title="Online payments">
+                  <span className="payment-text">UPI / Cards / NetBanking</span>
+                </div>
+              )}
+              {payments.codEnabled && (
+                <div className="payment-badge" title="Cash on delivery">
+                  <span className="payment-text">Cash on Delivery</span>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* 4. Copyright & Legal Navigation Bar */}
           <div className="footer-bottom-bar">
             <div className="footer-copyright">
-              © {new Date().getFullYear()} Lustre &amp; Co. All rights reserved.
+              © {year} {store.name} All rights reserved.
             </div>
 
-            <div className="footer-tagline">Everyday elegance, made to shine.</div>
+            <div className="footer-tagline">{store.tagline}</div>
 
             <div className="footer-legal-links">
               <Link to="/privacy" className="legal-link">

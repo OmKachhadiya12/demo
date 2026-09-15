@@ -1,13 +1,9 @@
-import { ArrowDownRight, ArrowUpRight } from "lucide-react";
+import { ArrowDownRight, ArrowUpRight, Minus } from "lucide-react";
 
-export default function StatCard({
-  label,
-  value,
-  change,
-  trend = "up",
-  icon: Icon,
-  tone = "gold"
-}) {
+export default function StatCard({ label, value, change, note, icon: Icon, tone = "gold" }) {
+  const hasChange = typeof change === "number";
+  const trend = !hasChange || change === 0 ? "flat" : change > 0 ? "up" : "down";
+
   return (
     <article className={`admin-stat-card admin-stat-${tone}`}>
       <div className="admin-stat-top">
@@ -19,14 +15,21 @@ export default function StatCard({
 
       <strong>{value}</strong>
 
-      <div className={`admin-stat-change ${trend}`}>
-        {trend === "up" ? (
-          <ArrowUpRight size={14} />
+      <div className={`admin-stat-change ${trend === "down" ? "down" : "up"}`}>
+        {hasChange ? (
+          <>
+            {trend === "up" && <ArrowUpRight size={14} />}
+            {trend === "down" && <ArrowDownRight size={14} />}
+            {trend === "flat" && <Minus size={14} />}
+            <span>
+              {change > 0 ? "+" : ""}
+              {change}%
+            </span>
+            <small>vs previous period</small>
+          </>
         ) : (
-          <ArrowDownRight size={14} />
+          <small>{note || "No earlier data to compare"}</small>
         )}
-        <span>{change}</span>
-        <small>vs last month</small>
       </div>
     </article>
   );

@@ -4,7 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model } from 'mongoose';
-import { User, UserDocument } from '../../users/schemas/user.schema.js';
+import { User, UserDocument, PRIVATE_USER_FIELDS } from '../../users/schemas/user.schema.js';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
@@ -22,8 +22,8 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: { sub: string; email: string }) {
-    const user = await this.userModel.findById(payload.sub).select('-password');
-    if (!user) {
+    const user = await this.userModel.findById(payload.sub).select(PRIVATE_USER_FIELDS);
+    if (!user || user.isActive === false) {
       throw new UnauthorizedException('User session has expired or no longer exists.');
     }
     return user;

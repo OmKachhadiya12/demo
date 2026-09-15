@@ -1,288 +1,247 @@
 import { Edit3, Plus, Tag, Trash2, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import AdminModal from "../components/AdminModal";
-import { adminDiscounts as fallbackDiscounts } from "../adminData";
-import api from "../../services/api";
+import { CheckboxField, EmptyState, ErrorState, Field, FormError, LoadingState, StatusBadge } from "../components/AdminUi";
+import { formatAdminPrice, formatDate } from "../utils";
+import { useStore } from "../../context/StoreContext";
+import api, { getErrorMessage } from "../../services/api";
 
-const blankDiscount = {
+const blank = {
   code: "",
-  type: "Percentage",
+  type: "percentage",
   value: "",
-  limit: "",
-  expiry: "",
-  status: "Active"
+  minOrderAmount: "",
+  usageLimit: "",
+  expiresAt: "",
+  description: "",
+  isActive: true
 };
 
-export default function AdminDiscounts() {
-  const [discounts, setDiscounts] = useState(fallbackDiscounts);
-  const [loading, setLoading] = useState(true);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editingDiscount, setEditingDiscount] = useState(null);
-  const [form, setForm] = useState(blankDiscount);
+function couponState(coupon) {
+  if (!coupon.isActive) return { label: "Inactive", tone: "info" };
+  if (coupon.expiresAt && new Date(coupon.expiresAt) < new Date()) return { label: "Expired", tone: "danger" };
+  if (coupon.usageLimit > 0 && coupon.usedCount >= coupon.usageLimit) return { label: "Limit reached", tone: "danger" };
+  if (coupon.expiresAt && new Date(coupon.expiresAt) - Date.now() < 7 * 86400000) return { label: "Expiring soon", tone: "warning" };
+  return { label: "Active", tone: "success" };
+}
 
-  async function loadDiscounts() {
+function valueLabel(coupon) {
+  if (coupon.type === "percentage") return `${Math.round(coupon.value * 100)}% off`;
+  if (coupon.type === "fixed") return `${formatAdminPrice(coupon.value)} off`;
+  return "Free shipping";
+}
+
+export default function AdminDiscounts() {
+  const { showToast } = useStore();
+  const [coupons, setCoupons] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState(blank);
+  const [formError, setFormError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
     setLoading(true);
+    setError("");
     try {
       const { data } = await api.get("/admin/discounts");
-      if (data && Array.isArray(data) && data.length > 0) {
-        const normalized = data.map((d) => {
-          const isPercentage = d.type === "percentage";
-          const valueDisplay = isPercentage
-            ? `${Math.round(d.value * 100)}%`
-            : d.type === "free_shipping"
-              ? "Free Shipping"
-              : `₹${d.value}`;
-
-          return {
-            id: d._id || d.code,
-            code: d.code,
-            type: isPercentage ? "Percentage" : "Fixed amount",
-            rawType: d.type,
-            value: valueDisplay,
-            numericValue: d.value,
-            limit: d.minOrderAmount ? `₹${d.minOrderAmount}` : "None",
-            uses: 12,
-            expiry: d.expiresAt ? new Date(d.expiresAt).toLocaleDateString() : "No expiry",
-            status: d.isActive ? "Active" : "Inactive"
-          };
-        });
-        setDiscounts(normalized);
-      }
+      setCoupons(data);
     } catch (err) {
-      console.warn("Using fallback discounts for admin:", err.message);
+      setError(getErrorMessage(err, "Discounts could not be loaded."));
     } finally {
       setLoading(false);
     }
-  }
-
-  useEffect(() => {
-    loadDiscounts();
   }, []);
 
-  function openCreate() {
-    setEditingDiscount(null);
-    setForm(blankDiscount);
-    setModalOpen(true);
-  }
+  useEffect(() => {
+    load();
+  }, [load]);
 
-  function openEdit(discount) {
-    setEditingDiscount(discount);
-    setForm({
-      code: discount.code,
-      type: discount.type,
-      value: discount.numericValue ? (discount.type === "Percentage" ? discount.numericValue * 100 : discount.numericValue) : "",
-      limit: discount.limit !== "None" ? discount.limit.replace("₹", "") : "",
-      expiry: discount.expiry !== "No expiry" ? discount.expiry : "",
-      status: discount.status
-    });
-    setModalOpen(true);
-  }
-
-  function updateForm(event) {
-    setForm((current) => ({
-      ...current,
-      [event.target.name]: event.target.value
-    }));
-  }
-
-  async function saveDiscount(event) {
-    event.preventDefault();
-
-    const normalizedCode = form.code.trim().toUpperCase();
-    const isPercentage = form.type === "Percentage";
-    const numericVal = Number(form.value);
-    const backendVal = isPercentage ? numericVal / 100 : numericVal;
-
-    try {
-      await api.post("/admin/discounts", {
-        code: normalizedCode,
-        type: isPercentage ? "percentage" : "fixed",
-        value: backendVal,
-        minOrderAmount: Number(form.limit || 0),
-        isActive: true,
-      });
-    } catch (err) {
-      console.warn("Backend discount create notice:", err.message);
-    }
-
-    const nextDiscount = {
-      id: `DISC-${Date.now()}`,
-      code: normalizedCode,
-      type: form.type,
-      value: isPercentage ? `${numericVal}%` : `₹${numericVal}`,
-      numericValue: backendVal,
-      limit: form.limit ? `₹${form.limit}` : "None",
-      uses: 0,
-      expiry: form.expiry || "No expiry",
-      status: "Active"
-    };
-
-    if (editingDiscount) {
-      setDiscounts((current) =>
-        current.map((discount) =>
-          discount.id === editingDiscount.id
-            ? { ...discount, ...nextDiscount }
-            : discount
-        )
-      );
-    } else {
-      setDiscounts((current) => [nextDiscount, ...current]);
-    }
-
-    setModalOpen(false);
-  }
-
-  async function deleteDiscount(id) {
-    const confirmed = window.confirm("Are you sure you want to delete this discount?");
-    if (!confirmed) return;
-
-    try {
-      await api.delete(`/admin/discounts/${id}`);
-    } catch (err) {
-      console.warn("Backend delete discount notice:", err.message);
-    }
-
-    setDiscounts((current) =>
-      current.filter((discount) => discount.id !== id && discount.code !== id)
+  function openModal(coupon = null) {
+    setEditing(coupon);
+    setForm(
+      coupon
+        ? {
+            code: coupon.code,
+            type: coupon.type,
+            value: coupon.type === "percentage" ? Math.round(coupon.value * 100) : coupon.value,
+            minOrderAmount: coupon.minOrderAmount || "",
+            usageLimit: coupon.usageLimit || "",
+            expiresAt: coupon.expiresAt ? coupon.expiresAt.slice(0, 10) : "",
+            description: coupon.description || "",
+            isActive: coupon.isActive
+          }
+        : blank
     );
+    setFormError("");
+    setModalOpen(true);
+  }
+
+  const set = (field) => (event) => setForm((current) => ({ ...current, [field]: event.target.value }));
+
+  async function save(event) {
+    event.preventDefault();
+    setSaving(true);
+    setFormError("");
+    const numericValue = Number(form.value || 0);
+    const payload = {
+      code: form.code.trim().toUpperCase(),
+      type: form.type,
+      value: form.type === "percentage" ? numericValue / 100 : form.type === "fixed" ? numericValue : 0,
+      minOrderAmount: Number(form.minOrderAmount || 0),
+      usageLimit: Number(form.usageLimit || 0),
+      description: form.description.trim(),
+      isActive: form.isActive,
+      expiresAt: form.expiresAt ? form.expiresAt : editing ? null : undefined
+    };
+    if (form.type === "percentage" && (numericValue <= 0 || numericValue > 100)) {
+      setFormError("Percentage must be between 1 and 100.");
+      setSaving(false);
+      return;
+    }
+    try {
+      if (editing) await api.put(`/admin/discounts/${editing._id}`, payload);
+      else await api.post("/admin/discounts", payload);
+      showToast(`Coupon ${payload.code} saved.`, "success");
+      setModalOpen(false);
+      load();
+    } catch (err) {
+      setFormError(getErrorMessage(err, "The coupon could not be saved."));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function toggleActive(coupon) {
+    try {
+      await api.put(`/admin/discounts/${coupon._id}`, { isActive: !coupon.isActive });
+      load();
+    } catch (err) {
+      showToast(getErrorMessage(err, "Could not update the coupon."), "error");
+    }
+  }
+
+  async function remove(coupon) {
+    if (!window.confirm(`Delete coupon ${coupon.code}?`)) return;
+    try {
+      await api.delete(`/admin/discounts/${coupon._id}`);
+      showToast(`Coupon ${coupon.code} deleted.`, "success");
+      load();
+    } catch (err) {
+      showToast(getErrorMessage(err, "The coupon could not be deleted."), "error");
+    }
   }
 
   return (
     <div className="admin-page">
       <div className="admin-page-heading">
         <div>
-          <span className="admin-eyebrow">Promotions</span>
+          <span className="admin-eyebrow">Sales</span>
           <h1>Discounts</h1>
-          <p>Create and manage promotional codes for your customers.</p>
+          <p>Create promo codes with minimum spend, usage limits, and expiry dates.</p>
         </div>
-
-        <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-          <button
-            type="button"
-            className="admin-button admin-button-light"
-            onClick={loadDiscounts}
-            title="Refresh coupons"
-            disabled={loading}
-          >
-            <RefreshCw size={15} className={loading ? "spin-icon" : ""} />
-            Refresh
+        <div className="admin-heading-actions">
+          <button type="button" className="admin-button admin-button-light" onClick={load} disabled={loading}>
+            <RefreshCw size={15} className={loading ? "spin-icon" : ""} /> Refresh
           </button>
-          <button className="admin-button admin-button-dark" onClick={openCreate}>
-            <Plus size={16} />
-            Create discount
+          <button className="admin-button admin-button-dark" onClick={() => openModal()}>
+            <Plus size={16} /> Create discount
           </button>
         </div>
       </div>
+
+      {error && <ErrorState message={error} onRetry={load} />}
+      {loading && !coupons.length && <LoadingState />}
+      {!loading && !error && coupons.length === 0 && <EmptyState title="No promo codes yet">Create your first discount code.</EmptyState>}
 
       <div className="admin-discount-grid">
-        {discounts.map((discount) => (
-          <article className="admin-discount-card" key={discount.id}>
-            <div className="discount-card-top">
-              <div className="discount-icon">
-                <Tag size={18} />
+        {coupons.map((coupon) => {
+          const state = couponState(coupon);
+          return (
+            <article className={`admin-discount-card ${coupon.isActive ? "" : "is-inactive"}`} key={coupon._id}>
+              <div className="discount-card-top">
+                <div className="discount-icon">
+                  <Tag size={18} />
+                </div>
+                <StatusBadge tone={state.tone}>{state.label}</StatusBadge>
               </div>
-              <span className={`admin-status-badge ${
-                discount.status === "Expiring soon" ? "warning" : "success"
-              }`}>
-                {discount.status}
-              </span>
-            </div>
 
-            <strong className="discount-code">{discount.code}</strong>
-            <span className="discount-value">{discount.value} off</span>
+              <strong className="discount-code">{coupon.code}</strong>
+              <span className="discount-value">{valueLabel(coupon)}</span>
+              {coupon.description && <small className="admin-muted">{coupon.description}</small>}
 
-            <div className="discount-card-details">
-              <span>
-                Min Spend
-                <b>{discount.limit}</b>
-              </span>
-              <span>
-                Expires
-                <b>{discount.expiry}</b>
-              </span>
-            </div>
+              <div className="discount-card-details">
+                <span>
+                  Min spend
+                  <b>{coupon.minOrderAmount ? formatAdminPrice(coupon.minOrderAmount) : "None"}</b>
+                </span>
+                <span>
+                  Used
+                  <b>
+                    {coupon.usedCount || 0} / {coupon.usageLimit || "∞"}
+                  </b>
+                </span>
+                <span>
+                  Expires
+                  <b>{coupon.expiresAt ? formatDate(coupon.expiresAt) : "Never"}</b>
+                </span>
+              </div>
 
-            <div className="discount-card-actions">
-              <button
-                className="admin-action-button"
-                onClick={() => openEdit(discount)}
-              >
-                <Edit3 size={15} />
-                Edit
-              </button>
-              <button
-                className="admin-action-button danger"
-                onClick={() => deleteDiscount(discount.id)}
-                title="Delete discount"
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
-          </article>
-        ))}
+              <div className="discount-card-actions">
+                <button className="admin-action-button" onClick={() => openModal(coupon)}>
+                  <Edit3 size={15} /> Edit
+                </button>
+                <button className="admin-action-button" onClick={() => toggleActive(coupon)}>
+                  {coupon.isActive ? "Deactivate" : "Activate"}
+                </button>
+                <button className="admin-action-button danger" onClick={() => remove(coupon)} title="Delete discount">
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            </article>
+          );
+        })}
       </div>
 
-      <AdminModal
-        isOpen={modalOpen}
-        onClose={() => setModalOpen(false)}
-        title={editingDiscount ? "Edit discount" : "Create discount"}
-        subtitle="Set up a promotional code for your storefront."
-      >
-        <form id="discount-form" className="admin-form-grid" onSubmit={saveDiscount}>
-          <label className="admin-form-field full-width">
-            Discount code
-            <input
-              name="code"
-              value={form.code}
-              onChange={updateForm}
-              placeholder="e.g. FESTIVE20"
-              required
-            />
-          </label>
-
-          <label className="admin-form-field">
-            Discount type
-            <select name="type" value={form.type} onChange={updateForm} className="admin-select">
-              <option>Percentage</option>
-              <option>Fixed amount</option>
+      <AdminModal open={modalOpen} onClose={() => setModalOpen(false)} title={editing ? "Edit discount" : "Create discount"} description="Customers enter this code in their bag or at checkout.">
+        <form className="admin-form-grid" onSubmit={save}>
+          <Field label="Code" hint="Letters, numbers, - and _">
+            <input value={form.code} onChange={set("code")} required pattern="[A-Za-z0-9_\-]+" placeholder="FESTIVE20" />
+          </Field>
+          <Field label="Type">
+            <select value={form.type} onChange={set("type")}>
+              <option value="percentage">Percentage off</option>
+              <option value="fixed">Fixed amount off</option>
+              <option value="free_shipping">Free shipping</option>
             </select>
-          </label>
-
-          <label className="admin-form-field">
-            Value ({form.type === "Percentage" ? "%" : "₹"})
-            <input
-              type="number"
-              min="1"
-              name="value"
-              value={form.value}
-              onChange={updateForm}
-              placeholder={form.type === "Percentage" ? "20" : "250"}
-              required
-            />
-          </label>
-
-          <label className="admin-form-field">
-            Min order subtotal (₹)
-            <input
-              type="number"
-              min="0"
-              name="limit"
-              value={form.limit}
-              onChange={updateForm}
-              placeholder="1999"
-            />
-          </label>
-
-          <div className="admin-form-actions full-width">
-            <button
-              type="button"
-              className="admin-button admin-button-light"
-              onClick={() => setModalOpen(false)}
-            >
+          </Field>
+          {form.type !== "free_shipping" && (
+            <Field label={form.type === "percentage" ? "Percent off" : "Amount off"}>
+              <input type="number" min="1" max={form.type === "percentage" ? 100 : undefined} value={form.value} onChange={set("value")} required />
+            </Field>
+          )}
+          <Field label="Minimum subtotal" hint="0 or blank for no minimum">
+            <input type="number" min="0" value={form.minOrderAmount} onChange={set("minOrderAmount")} />
+          </Field>
+          <Field label="Usage limit" hint="Total redemptions; blank for unlimited">
+            <input type="number" min="0" value={form.usageLimit} onChange={set("usageLimit")} />
+          </Field>
+          <Field label="Expiry date" hint="Blank for no expiry">
+            <input type="date" value={form.expiresAt} onChange={set("expiresAt")} />
+          </Field>
+          <Field label="Internal description" full>
+            <input value={form.description} onChange={set("description")} />
+          </Field>
+          <CheckboxField label="Active" checked={form.isActive} onChange={(value) => setForm({ ...form, isActive: value })} />
+          <FormError message={formError} />
+          <div className="admin-modal-actions">
+            <button type="button" className="admin-button admin-button-light" onClick={() => setModalOpen(false)}>
               Cancel
             </button>
-            <button type="submit" className="admin-button admin-button-dark">
-              Save discount
+            <button type="submit" className="admin-button admin-button-dark" disabled={saving}>
+              {saving ? "Saving…" : "Save discount"}
             </button>
           </div>
         </form>
