@@ -67,12 +67,9 @@ export default function QuickViewModal({ product, isOpen, onClose }) {
     if (isLoading || isAdded) return;
     setIsLoading(true);
 
-    // Simulate realistic asynchronous network / cart operation
-    await new Promise((resolve) => setTimeout(resolve, 650));
-
-    addToCart(product, quantity);
+    const added = await addToCart(product, quantity);
     setIsLoading(false);
-    setIsAdded(true);
+    setIsAdded(added);
 
     setTimeout(() => {
       setIsAdded(false);

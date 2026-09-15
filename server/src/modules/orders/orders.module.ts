@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 import { PassportModule } from '@nestjs/passport';
-import { JwtModule } from '@nestjs/jwt';
 import { Order, OrderSchema } from './schemas/order.schema.js';
 import { Product, ProductSchema } from '../products/schemas/product.schema.js';
 import { Cart, CartSchema } from '../cart/schemas/cart.schema.js';
@@ -12,14 +11,13 @@ import { Payment, PaymentSchema } from '../payments/schemas/payment.schema.js';
 
 @Module({
   imports: [
+    PassportModule.register({ defaultStrategy: 'jwt' }),
     MongooseModule.forFeature([
       { name: Order.name, schema: OrderSchema },
       { name: Product.name, schema: ProductSchema },
       { name: Cart.name, schema: CartSchema },
       { name: Payment.name, schema: PaymentSchema },
     ]),
-    PassportModule.register({ defaultStrategy: 'jwt' }),
-    JwtModule,
     DiscountsModule,
   ],
   controllers: [OrdersController],

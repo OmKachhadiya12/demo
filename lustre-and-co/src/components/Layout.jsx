@@ -9,7 +9,8 @@ export default function Layout() {
   const isAuthPage =
     location.pathname === "/account/login" ||
     location.pathname === "/account/signup" ||
-    location.pathname === "/account/forgot-password";
+    location.pathname === "/account/forgot-password" ||
+    location.pathname === "/account/reset-password";
 
   if (isAuthPage) {
     return <Outlet />;

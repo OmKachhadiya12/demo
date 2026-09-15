@@ -1,83 +1,94 @@
 import { Link } from "react-router-dom";
 import PageIntro from "../components/PageIntro";
+import CmsPageState from "../components/CmsPageState";
+import useCmsPage, { toParagraphs } from "../hooks/useCmsPage";
 
 export default function About() {
+  const { page, status, error } = useCmsPage("about");
+  if (status !== "ready") return <CmsPageState status={status} error={error} />;
+
+  const [story, ...sections] = page.sections || [];
+
   return (
     <>
       <PageIntro
-        eyebrow="The Lustre & Co. story"
-        title="Beautiful details should feel effortless."
-        description="We create approachable jewelry for the way modern women actually live, dress, celebrate, and give."
+        eyebrow={page.eyebrow}
+        title={page.title}
+        description={page.description}
         breadcrumbs={[{ label: "About Us" }]}
         tone="dark"
       />
 
-      <section className="section about-story-section">
-        <div className="container about-story-grid">
-          <div className="about-story-image">
-            <img
-              src="https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1200&q=85"
-              alt="Lustre and Co. jewelry"
-            />
-          </div>
+      {story && (
+        <section className="section about-story-section">
+          <div className="container about-story-grid">
+            {story.image && (
+              <div className="about-story-image">
+                <img src={story.image} alt={story.heading || page.title} />
+              </div>
+            )}
 
-          <div className="about-story-copy">
-            <span className="eyebrow">Our point of view</span>
-            <h2>Jewelry is a small detail with a big feeling.</h2>
-            <p>
-              Lustre & Co. began with a simple belief: beautiful style should
-              not need to feel distant or difficult to reach.
-            </p>
-            <p>
-              Our collections bring together modern silhouettes, soft
-              feminine details, and occasion-ready sparkle at accessible
-              prices. Every piece is selected to be worn, enjoyed, gifted, and
-              remembered.
-            </p>
-            <Link to="/shop" className="button button-dark">
-              Explore the collection
-            </Link>
-          </div>
-        </div>
-      </section>
-
-      <section className="section section-beige">
-        <div className="container values-section">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">What guides us</span>
-              <h2>Simple values, thoughtfully applied.</h2>
+            <div className="about-story-copy">
+              {story.eyebrow && <span className="eyebrow">{story.eyebrow}</span>}
+              {story.heading && <h2>{story.heading}</h2>}
+              {toParagraphs(story.body).map((paragraph, index) => (
+                <p key={index}>{paragraph}</p>
+              ))}
+              {story.bullets?.length > 0 && (
+                <ul>
+                  {story.bullets.map((bullet) => (
+                    <li key={bullet}>{bullet}</li>
+                  ))}
+                </ul>
+              )}
+              {story.ctaLabel && (
+                <Link to={story.ctaLink || "/shop"} className="button button-dark">
+                  {story.ctaLabel}
+                </Link>
+              )}
             </div>
           </div>
+        </section>
+      )}
 
-          <div className="values-grid">
-            <article>
-              <span>01</span>
-              <h3>Accessible elegance</h3>
-              <p>
-                Premium-looking pieces designed to make polished styling feel
-                within reach.
+      {sections.map((section, sectionIndex) => (
+        <section className={`section ${sectionIndex % 2 === 0 ? "section-beige" : ""}`} key={sectionIndex}>
+          <div className="container values-section">
+            {(section.eyebrow || section.heading) && (
+              <div className="section-heading">
+                <div>
+                  {section.eyebrow && <span className="eyebrow">{section.eyebrow}</span>}
+                  {section.heading && <h2>{section.heading}</h2>}
+                </div>
+              </div>
+            )}
+
+            {toParagraphs(section.body).map((paragraph, index) => (
+              <p key={index} className="cms-paragraph">
+                {paragraph}
               </p>
-            </article>
-            <article>
-              <span>02</span>
-              <h3>Thoughtful selection</h3>
-              <p>
-                We choose designs that feel current today and easy to wear
-                again tomorrow.
-              </p>
-            </article>
-            <article>
-              <span>03</span>
-              <h3>Human service</h3>
-              <p>
-                Clear communication, dependable support, and a shopping
-                experience you can trust.
-              </p>
-            </article>
+            ))}
+
+            {section.items?.length > 0 && (
+              <div className="values-grid">
+                {section.items.map((item, index) => (
+                  <article key={`${item.title}-${index}`}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>
+                    <h3>{item.title}</h3>
+                    <p>{item.text}</p>
+                  </article>
+                ))}
+              </div>
+            )}
+
+            {section.ctaLabel && (
+              <Link to={section.ctaLink || "/shop"} className="button button-dark">
+                {section.ctaLabel}
+              </Link>
+            )}
           </div>
-        </div>
-      </section>
+        </section>
+      ))}
     </>
   );
 }

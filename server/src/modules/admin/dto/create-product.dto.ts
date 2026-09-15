@@ -1,82 +1,90 @@
 import {
   IsArray,
+  IsBoolean,
+  IsIn,
   IsNotEmpty,
   IsNumber,
   IsOptional,
   IsString,
   Min,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
 export class AdminCreateProductDto {
-  @ApiProperty({ example: 'Celeste Pearl Drop Earrings', description: 'Product title' })
+  @ApiProperty({ example: 'Celeste Pearl Drop Earrings' })
   @IsString()
   @IsNotEmpty({ message: 'Product name is required.' })
   name: string;
 
-  @ApiProperty({
-    example: 'earrings',
-    description: 'Category: necklaces, earrings, rings, bracelets, bangles',
-  })
+  @ApiProperty({ example: 'earrings', description: 'Slug of an existing category' })
   @IsString()
   @IsNotEmpty({ message: 'Category is required.' })
   category: string;
 
+  @ApiPropertyOptional({ example: 'LC-EAR-001' })
+  @IsOptional()
+  @IsString()
+  sku?: string;
+
   @ApiPropertyOptional({ example: 'bridal', default: 'everyday' })
   @IsOptional()
   @IsString()
-  collectionName?: string = 'everyday';
+  collectionName?: string;
 
-  @ApiProperty({ example: 1499, description: 'Selling price in INR' })
+  @ApiPropertyOptional({ enum: ['everyday', 'bridal', 'party', 'festive'] })
+  @IsOptional()
+  @IsIn(['everyday', 'bridal', 'party', 'festive'])
+  occasion?: string;
+
+  @ApiProperty({ example: 1499 })
   @Type(() => Number)
   @IsNumber()
   @Min(0, { message: 'Price cannot be negative.' })
   price: number;
 
-  @ApiPropertyOptional({ example: 2199, description: 'Original MSRP/strikethrough price' })
+  @ApiPropertyOptional({ example: 2199, nullable: true, description: 'Strikethrough price; null clears it' })
   @IsOptional()
+  @ValidateIf((o) => o.oldPrice !== null)
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  oldPrice?: number;
+  oldPrice?: number | null;
 
-  @ApiProperty({ example: 45, default: 50, description: 'Available warehouse stock' })
+  @ApiProperty({ example: 45 })
   @Type(() => Number)
   @IsNumber()
   @Min(0, { message: 'Stock cannot be negative.' })
   stockQuantity: number;
 
-  @ApiProperty({
-    example: 'https://images.unsplash.com/photo-1535632066927-ab7c9ab60908',
-    description: 'Primary product thumbnail image URL',
-  })
+  @ApiProperty({ example: 'https://images.unsplash.com/photo-1535632066927-ab7c9ab60908' })
   @IsString()
   @IsNotEmpty({ message: 'Primary image URL is required.' })
   image: string;
 
-  @ApiPropertyOptional({ type: [String], description: 'Additional gallery image URLs' })
+  @ApiPropertyOptional({ type: [String] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
   gallery?: string[];
 
-  @ApiPropertyOptional({ example: 'Handcrafted luxury 18K gold plated brass piece.' })
+  @ApiPropertyOptional()
   @IsOptional()
   @IsString()
   description?: string;
 
-  @ApiPropertyOptional({ example: '18K Gold Plated', default: '18K Gold Plated' })
+  @ApiPropertyOptional({ example: '18K Gold Plated' })
   @IsOptional()
   @IsString()
-  finish?: string = '18K Gold Plated';
+  finish?: string;
 
-  @ApiPropertyOptional({ example: 'Gold-plated brass with freshwater pearls' })
+  @ApiPropertyOptional({ example: 'Gold-plated brass' })
   @IsOptional()
   @IsString()
-  material?: string = 'Gold-plated brass';
+  material?: string;
 
-  @ApiPropertyOptional({ example: ['Gold', 'Rose Gold', 'Silver'] })
+  @ApiPropertyOptional({ example: ['Gold', 'Rose gold', 'Silver'] })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })
@@ -88,8 +96,22 @@ export class AdminCreateProductDto {
   @IsString({ each: true })
   availableSizes?: string[];
 
-  @ApiPropertyOptional({ example: 'Bestseller', enum: ['Bestseller', 'New Arrival', 'Sale', 'Trending'] })
+  @ApiPropertyOptional({ example: 'Bestseller', description: 'Empty string clears the badge' })
   @IsOptional()
   @IsString()
   badge?: string;
+
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) details?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) care?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) shipping?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsOptional() @IsArray() @IsString({ each: true }) returns?: string[];
+
+  @ApiPropertyOptional({ example: ['new', 'bestseller'] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  tags?: string[];
+
+  @ApiPropertyOptional({ default: true }) @IsOptional() @IsBoolean() isActive?: boolean;
+  @ApiPropertyOptional({ default: false }) @IsOptional() @IsBoolean() isFeatured?: boolean;
 }

@@ -11,26 +11,34 @@ export class Product {
   @Prop({ type: String, required: true })
   name: string;
 
+  @Prop({ type: String, index: true })
+  sku?: string;
+
   @Prop({ type: String, required: true, index: true })
-  category: string; // 'necklaces' | 'earrings' | 'rings' | 'bracelets' | 'bangles'
+  category: string; // slug of a document in the categories collection
 
   @Prop({ type: String, default: 'everyday' })
   collectionName: string;
 
+  @Prop({ type: String, default: 'everyday' })
+  occasion: string; // 'everyday' | 'bridal' | 'party' | 'festive'
+
   @Prop({ type: Number, required: true })
-  price: number; // e.g. 1499
+  price: number;
 
   @Prop({ type: Number })
-  oldPrice?: number; // e.g. 2199
+  oldPrice?: number;
 
-  @Prop({ type: Number, default: 4.9 })
+  /** Average of approved reviews; recalculated whenever reviews are moderated. */
+  @Prop({ type: Number, default: 0 })
   rating: number;
 
+  /** Count of approved reviews. */
   @Prop({ type: Number, default: 0 })
   reviews: number;
 
   @Prop({ type: String })
-  badge?: string; // 'Bestseller' | 'New' | 'Sale'
+  badge?: string;
 
   @Prop({ type: String, default: '18K Gold Plated' })
   finish: string;
@@ -49,6 +57,10 @@ export class Product {
 
   @Prop({ type: Number, default: 50 })
   stockQuantity: number;
+
+  /** Units sold across non-cancelled orders. */
+  @Prop({ type: Number, default: 0 })
+  salesCount: number;
 
   @Prop({ type: String, required: true })
   image: string;
@@ -72,18 +84,18 @@ export class Product {
   returns: string[];
 
   @Prop({ type: [String], default: [] })
-  tags: string[];
+  tags: string[]; // 'new' and 'bestseller' drive the New Arrivals / Best Sellers pages
 
-  @Prop({ type: [Object], default: [] })
-  customerReviews: Array<{
-    id?: string;
-    author: string;
-    rating: number;
-    date: string;
-    verified: boolean;
-    title: string;
-    comment: string;
-  }>;
+  /** Hidden products are excluded from the storefront but stay visible to admins. */
+  @Prop({ type: Boolean, default: true, index: true })
+  isActive: boolean;
+
+  @Prop({ type: Boolean, default: false })
+  isFeatured: boolean;
+
+  /** Legacy embedded reviews, migrated into the reviews collection by the seeder. */
+  @Prop({ type: [Object], select: false })
+  customerReviews?: any[];
 }
 
 export const ProductSchema = SchemaFactory.createForClass(Product);

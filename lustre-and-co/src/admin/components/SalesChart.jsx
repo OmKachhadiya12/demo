@@ -1,43 +1,32 @@
 import { useMemo } from "react";
-import { salesData as fallbackData } from "../adminData";
+import { useSettings } from "../../context/SettingsContext";
+import { formatCompactPrice } from "../utils";
 
-export default function SalesChart({ data }) {
-  const chartItems = useMemo(() => {
-    if (data && Array.isArray(data) && data.length > 0) {
-      return data.map((item) => ({
-        label: item.day || item.label || "Day",
-        value: Number(item.amount || item.value || 0),
-      }));
-    }
-    return fallbackData;
-  }, [data]);
+export default function SalesChart({ data = [] }) {
+  const { commerce } = useSettings();
 
-  const max = useMemo(() => {
-    const rawMax = Math.max(...chartItems.map((item) => item.value), 1000);
-    return rawMax > 0 ? rawMax : 1000;
-  }, [chartItems]);
+  const max = useMemo(() => Math.max(...data.map((item) => item.amount), 1), [data]);
 
   const points = useMemo(() => {
-    if (chartItems.length <= 1) return "0,50 100,50";
-    return chartItems
+    if (data.length <= 1) return "0,100 100,100";
+    return data
       .map((item, index) => {
-        const x = (index / (chartItems.length - 1)) * 100;
-        const y = 100 - (item.value / max) * 82;
+        const x = (index / (data.length - 1)) * 100;
+        const y = 100 - (item.amount / max) * 82;
         return `${x.toFixed(1)},${y.toFixed(1)}`;
       })
       .join(" ");
-  }, [chartItems, max]);
+  }, [data, max]);
 
-  const areaPoints = `0,100 ${points} 100,100`;
+  // Keep labels readable when there are many buckets.
+  const labelStep = Math.ceil(data.length / 8);
 
   return (
     <div className="sales-chart">
       <div className="sales-chart-y-axis">
-        <span>₹{(max / 1000).toFixed(0)}k</span>
-        <span>₹{((max * 0.75) / 1000).toFixed(0)}k</span>
-        <span>₹{((max * 0.5) / 1000).toFixed(0)}k</span>
-        <span>₹{((max * 0.25) / 1000).toFixed(0)}k</span>
-        <span>₹0</span>
+        {[1, 0.75, 0.5, 0.25, 0].map((fraction) => (
+          <span key={fraction}>{formatCompactPrice(max * fraction, commerce.currency)}</span>
+        ))}
       </div>
 
       <div className="sales-chart-stage">
@@ -54,6 +43,8 @@ export default function SalesChart({ data }) {
           preserveAspectRatio="none"
           className="sales-chart-svg"
           style={{ width: "100%", height: "100%", position: "absolute", inset: 0 }}
+          role="img"
+          aria-label="Revenue trend"
         >
           <defs>
             <linearGradient id="salesGradient" x1="0" y1="0" x2="0" y2="1">
@@ -61,7 +52,7 @@ export default function SalesChart({ data }) {
               <stop offset="100%" stopColor="#d4af37" stopOpacity="0.0" />
             </linearGradient>
           </defs>
-          <polygon points={areaPoints} fill="url(#salesGradient)" />
+          <polygon points={`0,100 ${points} 100,100`} fill="url(#salesGradient)" />
           <polyline
             points={points}
             fill="none"
@@ -69,12 +60,15 @@ export default function SalesChart({ data }) {
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
-          />
+            vectorEffect="non-scaling-stroke"
+          >
+            <title>{data.map((d) => `${d.label}: ${d.amount}`).join(", ")}</title>
+          </polyline>
         </svg>
 
         <div className="sales-chart-labels">
-          {chartItems.map((item, idx) => (
-            <span key={`${item.label}-${idx}`}>{item.label}</span>
+          {data.map((item, idx) => (
+            <span key={`${item.label}-${idx}`}>{idx % labelStep === 0 ? item.label : ""}</span>
           ))}
         </div>
       </div>

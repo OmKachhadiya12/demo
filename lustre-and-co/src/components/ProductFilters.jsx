@@ -7,6 +7,7 @@ import {
   Check,
   Filter
 } from "lucide-react";
+import { useSettings } from "../context/SettingsContext";
 
 export const filterOptions = {
   categories: [
@@ -72,6 +73,12 @@ export default function ProductFilters({
   totalResults = 0,
   isSidebar = true
 }) {
+  const { categories } = useSettings();
+  const categoryOptions = [
+    { label: "All Categories", value: "all" },
+    ...categories.map((category) => ({ label: category.name, value: category.slug }))
+  ];
+
   // Accordion expand/collapse states (all open by default for clear visibility)
   const [openSections, setOpenSections] = useState({
     category: true,
@@ -137,7 +144,7 @@ export default function ProductFilters({
 
         {openSections.category && (
           <div className="filter-accordion-body">
-            {filterOptions.categories.map((opt) => (
+            {categoryOptions.map((opt) => (
               <label key={opt.value} className="filter-radio-pill">
                 <input
                   type="radio"
