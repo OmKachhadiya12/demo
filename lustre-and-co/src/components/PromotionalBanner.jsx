@@ -1,17 +1,16 @@
 import { Link } from "react-router-dom";
 import { ArrowRight, Truck, RotateCcw, ShieldCheck, Sparkles, Gift } from "lucide-react";
 import { motion } from "framer-motion";
+import { useSettings } from "../context/SettingsContext";
+import { formatPrice } from "../data/products";
 
-export default function PromotionalBanner({
-  eyebrow = "Limited Time Offer",
-  heading = "More Shine, More Savings",
-  text = "Buy 2 jewelry pieces and get 1 free.",
-  buttonText = "Shop the Offer",
-  buttonLink = "/shop",
-  image = "https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=1200&q=85",
-  imageAlt = "Lustre & Co. Luxury Gold Jewelry Collection",
-  className = ""
-}) {
+export default function PromotionalBanner({ className = "" }) {
+  const { settings } = useSettings();
+  const promo = settings.homepage.promo;
+  const { commerce } = settings;
+
+  if (!promo?.enabled) return null;
+
   return (
     <section className={`promo-banner-section ${className}`}>
       <div className="container">
@@ -22,40 +21,39 @@ export default function PromotionalBanner({
           viewport={{ once: true, amount: 0.2 }}
           transition={{ duration: 0.65, ease: [0.16, 1, 0.3, 1] }}
         >
-          {/* Subtle Ambient Decorative Highlights */}
           <div className="promo-gold-glow promo-glow-left" aria-hidden="true" />
           <div className="promo-gold-glow promo-glow-right" aria-hidden="true" />
 
           <div className="promo-banner-split">
-            {/* Left Column: Promotional Content & Value Badges */}
             <div className="promo-banner-content">
-              {/* Eyebrow Pill */}
-              <div className="promo-badge-pill">
-                <Sparkles size={13} className="promo-sparkle-icon" />
-                <span>{eyebrow}</span>
-              </div>
+              {promo.eyebrow && (
+                <div className="promo-badge-pill">
+                  <Sparkles size={13} className="promo-sparkle-icon" />
+                  <span>{promo.eyebrow}</span>
+                </div>
+              )}
 
-              {/* Main Heading */}
               <h2 className="promo-banner-heading">
-                More Shine, <em>More Savings</em>
+                {promo.heading} {promo.highlight && <em>{promo.highlight}</em>}
               </h2>
 
-              {/* Promotional Text */}
-              <p className="promo-banner-text">{text}</p>
+              <p className="promo-banner-text">{promo.text}</p>
 
-              {/* Primary Call to Action Button */}
               <div className="promo-banner-cta">
-                <Link to={buttonLink} className="button promo-cta-btn">
-                  <span>{buttonText}</span>
-                  <ArrowRight size={16} />
-                </Link>
-                <span className="promo-cta-hint">
-                  <Gift size={14} />
-                  <span>Discount applies automatically at checkout</span>
-                </span>
+                {promo.ctaLabel && (
+                  <Link to={promo.ctaLink || "/shop"} className="button promo-cta-btn">
+                    <span>{promo.ctaLabel}</span>
+                    <ArrowRight size={16} />
+                  </Link>
+                )}
+                {promo.tagTitle && (
+                  <span className="promo-cta-hint">
+                    <Gift size={14} />
+                    <span>Enter the code at checkout</span>
+                  </span>
+                )}
               </div>
 
-              {/* 3 Core Value Propositions */}
               <div className="promo-perks-grid">
                 <div className="promo-perk-item">
                   <div className="perk-icon-circle">
@@ -63,7 +61,7 @@ export default function PromotionalBanner({
                   </div>
                   <div className="perk-text-group">
                     <strong>Free shipping</strong>
-                    <span>On orders above $50</span>
+                    <span>On orders above {formatPrice(commerce.freeShippingThreshold)}</span>
                   </div>
                 </div>
 
@@ -73,7 +71,7 @@ export default function PromotionalBanner({
                   </div>
                   <div className="perk-text-group">
                     <strong>Easy returns</strong>
-                    <span>7-day hassle-free</span>
+                    <span>{commerce.returnWindowDays}-day returns</span>
                   </div>
                 </div>
 
@@ -82,29 +80,24 @@ export default function PromotionalBanner({
                     <ShieldCheck size={17} />
                   </div>
                   <div className="perk-text-group">
-                    <strong>Secure payments</strong>
-                    <span>100% encrypted & certified</span>
+                    <strong>Secure checkout</strong>
+                    <span>{settings.payments.codEnabled ? "Cash on delivery available" : "Protected payments"}</span>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Right Column: High-End Jewelry Imagery */}
             <div className="promo-banner-visual">
               <div className="promo-image-wrapper">
-                <img
-                  src={image}
-                  alt={imageAlt}
-                  className="promo-image"
-                  loading="lazy"
-                />
+                <img src={promo.image} alt={promo.heading} className="promo-image" loading="lazy" />
 
-                {/* Floating Promotion Overlay Card */}
-                <div className="promo-floating-tag">
-                  <span className="floating-tag-badge">Special Edition</span>
-                  <strong>Buy 2 Get 1 Free</strong>
-                  <small>Mix & match across all categories</small>
-                </div>
+                {promo.tagTitle && (
+                  <div className="promo-floating-tag">
+                    <span className="floating-tag-badge">Offer</span>
+                    <strong>{promo.tagTitle}</strong>
+                    {promo.tagText && <small>{promo.tagText}</small>}
+                  </div>
+                )}
               </div>
             </div>
           </div>

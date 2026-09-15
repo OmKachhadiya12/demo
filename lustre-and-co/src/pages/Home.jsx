@@ -1,48 +1,32 @@
 import { Link } from "react-router-dom";
-import { ArrowUpRight, Sparkles } from "lucide-react";
+import { ArrowUpRight, Star } from "lucide-react";
 import { motion } from "framer-motion";
 import ThreeHero from "../components/ThreeHero";
 import SectionHeading from "../components/SectionHeading";
 import ProductGrid from "../components/ProductGrid";
 import PromotionalBanner from "../components/PromotionalBanner";
 import WhyShopWithUs from "../components/WhyShopWithUs";
-import { products } from "../data/products";
+import { useSettings } from "../context/SettingsContext";
+import { useStore } from "../context/StoreContext";
 
-const categories = [
-  {
-    title: "Necklaces",
-    path: "/category/necklaces",
-    image:
-      "https://images.unsplash.com/photo-1515562141207-7a88fb7ce338?auto=format&fit=crop&w=900&q=85"
-  },
-  {
-    title: "Earrings",
-    path: "/category/earrings",
-    image:
-      "https://images.unsplash.com/photo-1535632066927-ab7c9ab60908?auto=format&fit=crop&w=900&q=85"
-  },
-  {
-    title: "Rings",
-    path: "/category/rings",
-    image:
-      "https://images.unsplash.com/photo-1605100804763-247f67b3557e?auto=format&fit=crop&w=900&q=85"
-  },
-  {
-    title: "Bracelets",
-    path: "/category/bracelets",
-    image:
-      "https://images.unsplash.com/photo-1599643478518-a784e5dc4c8f?auto=format&fit=crop&w=900&q=85"
-  }
-];
+function ProductSection({ status, products, emptyText }) {
+  if (status === "loading") return <p className="catalog-loading">Loading pieces…</p>;
+  if (status === "error") return <p className="inline-alert inline-alert-error">Products could not be loaded.</p>;
+  if (!products.length) return <p className="catalog-loading">{emptyText}</p>;
+  return <ProductGrid products={products} />;
+}
 
 export default function Home() {
-  const newProducts = products.filter((product) =>
-    product.tags.includes("new")
-  );
+  const { settings, categories } = useSettings();
+  const { products, productsStatus } = useStore();
+  const { hero, categoriesSection, newArrivalsSection, bestSellersSection, editorial, testimonial } =
+    settings.homepage;
+  const { stats, commerce } = settings;
 
-  const bestProducts = products.filter((product) =>
-    product.tags.includes("bestseller")
-  );
+  const homeCategories = categories.filter((category) => category.showOnHome);
+  const newProducts = products.filter((product) => product.tags.includes("new")).slice(0, 4);
+  const tagged = products.filter((product) => product.tags.includes("bestseller"));
+  const bestProducts = (tagged.length ? tagged : [...products].sort((a, b) => b.salesCount - a.salesCount)).slice(0, 4);
 
   return (
     <>
@@ -55,36 +39,41 @@ export default function Home() {
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.7 }}
           >
-            <span className="eyebrow">The new everyday edit</span>
+            <span className="eyebrow">{hero.eyebrow}</span>
             <h1>
-              Every day deserves a little <em>lustre.</em>
+              {hero.title} {hero.highlight && <em>{hero.highlight}</em>}
             </h1>
-            <p>
-              Modern imitation jewelry designed to bring polished style,
-              thoughtful detail, and accessible sparkle to every moment.
-            </p>
+            <p>{hero.subtitle}</p>
 
             <div className="hero-actions">
-              <Link to="/new-arrivals" className="button button-dark">
-                Shop new arrivals
-                <ArrowUpRight size={17} />
-              </Link>
-              <Link to="/collections/bridal" className="text-link">
-                Explore bridal
-              </Link>
+              {hero.primaryCtaLabel && (
+                <Link to={hero.primaryCtaLink || "/shop"} className="button button-dark">
+                  {hero.primaryCtaLabel}
+                  <ArrowUpRight size={17} />
+                </Link>
+              )}
+              {hero.secondaryCtaLabel && (
+                <Link to={hero.secondaryCtaLink || "/shop"} className="text-link">
+                  {hero.secondaryCtaLabel}
+                </Link>
+              )}
             </div>
 
-            <div className="hero-proof">
-              <div className="hero-proof-avatars">
-                <span>R</span>
-                <span>A</span>
-                <span>M</span>
+            {stats.reviewCount > 0 && (
+              <div className="hero-proof">
+                <div className="hero-proof-avatars" aria-hidden="true">
+                  <span>
+                    <Star size={13} fill="currentColor" />
+                  </span>
+                </div>
+                <div>
+                  <strong>
+                    {stats.averageRating}/5 from {stats.reviewCount} {stats.reviewCount === 1 ? "review" : "reviews"}
+                  </strong>
+                  <small>Rated by customers who wear our pieces.</small>
+                </div>
               </div>
-              <div>
-                <strong>4.9/5 from 500+ customers</strong>
-                <small>Thoughtfully loved, beautifully worn.</small>
-              </div>
-            </div>
+            )}
           </motion.div>
 
           <motion.div
@@ -95,132 +84,135 @@ export default function Home() {
           >
             <div className="hero-visual-ring hero-ring-one" />
             <div className="hero-visual-ring hero-ring-two" />
-            <div className="hero-visual-card">
-              <span className="eyebrow">New season</span>
-              <strong>Made to shine</strong>
-              <small>Minimal pieces. Maximum mood.</small>
-            </div>
+            {hero.cardTitle && (
+              <div className="hero-visual-card">
+                <span className="eyebrow">{hero.cardEyebrow}</span>
+                <strong>{hero.cardTitle}</strong>
+                <small>{hero.cardText}</small>
+              </div>
+            )}
             <ThreeHero />
           </motion.div>
         </div>
       </section>
 
-      {/* Why Shop With Us - Five Benefit Cards */}
       <WhyShopWithUs />
 
-      <section className="section home-section">
-        <div className="container">
-          <SectionHeading
-            eyebrow="Find your style"
-            title="Made for every mood"
-            description="From quiet daily sparkle to statement pieces for your most memorable occasions."
-            linkLabel="Shop all jewelry"
-            linkTo="/shop"
-          />
+      {homeCategories.length > 0 && (
+        <section className="section home-section">
+          <div className="container">
+            <SectionHeading
+              eyebrow={categoriesSection.eyebrow}
+              title={categoriesSection.title}
+              description={categoriesSection.description}
+              linkLabel="Shop all jewelry"
+              linkTo="/shop"
+            />
 
-          <div className="category-card-grid">
-            {categories.map((category, index) => (
-              <motion.div
-                key={category.path}
-                className="category-card"
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: index * 0.06 }}
-              >
-                <Link to={category.path}>
-                  <img src={category.image} alt={category.title} loading="lazy" />
-                  <div className="category-card-overlay">
-                    <h3>{category.title}</h3>
-                    <span>Explore collection →</span>
-                  </div>
-                </Link>
-              </motion.div>
-            ))}
+            <div className="category-card-grid">
+              {homeCategories.map((category, index) => (
+                <motion.div
+                  key={category.slug}
+                  className="category-card"
+                  initial={{ opacity: 0, y: 20 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ delay: index * 0.06 }}
+                >
+                  <Link to={`/category/${category.slug}`}>
+                    {category.image && <img src={category.image} alt={category.name} loading="lazy" />}
+                    <div className="category-card-overlay">
+                      <h3>{category.name}</h3>
+                      <span>Explore collection →</span>
+                    </div>
+                  </Link>
+                </motion.div>
+              ))}
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       <section className="section home-section section-beige">
         <div className="container">
           <SectionHeading
-            eyebrow="Just in"
-            title="New arrivals"
-            description="Fresh pieces selected to make your everyday styling feel new again."
+            eyebrow={newArrivalsSection.eyebrow}
+            title={newArrivalsSection.title}
+            description={newArrivalsSection.description}
             linkLabel="View all new arrivals"
             linkTo="/new-arrivals"
           />
-          <ProductGrid products={newProducts.slice(0, 4)} />
+          <ProductSection status={productsStatus} products={newProducts} emptyText="New pieces are on their way." />
         </div>
       </section>
 
-      <section className="editorial-banner">
-        <div className="container editorial-banner-inner">
-          <div className="editorial-banner-copy">
-            <span className="eyebrow">The bridal edit</span>
-            <h2>For the moments you will remember forever.</h2>
-            <p>
-              Discover statement jewelry designed for celebrations, ceremonies,
-              and every beautiful detail in between.
-            </p>
-            <Link to="/collections/bridal" className="button button-light">
-              Explore bridal
-              <ArrowUpRight size={17} />
-            </Link>
-          </div>
+      {editorial.enabled && (
+        <section className="editorial-banner">
+          <div className="container editorial-banner-inner">
+            <div className="editorial-banner-copy">
+              <span className="eyebrow">{editorial.eyebrow}</span>
+              <h2>{editorial.title}</h2>
+              <p>{editorial.text}</p>
+              {editorial.ctaLabel && (
+                <Link to={editorial.ctaLink || "/shop"} className="button button-light">
+                  {editorial.ctaLabel}
+                  <ArrowUpRight size={17} />
+                </Link>
+              )}
+            </div>
 
-          <div className="editorial-banner-image">
-            <img
-              src="https://images.unsplash.com/photo-1617038220319-276d3cfab638?auto=format&fit=crop&w=1300&q=85"
-              alt="Bridal jewelry"
-              loading="lazy"
-            />
+            {editorial.image && (
+              <div className="editorial-banner-image">
+                <img src={editorial.image} alt={editorial.eyebrow} loading="lazy" />
+              </div>
+            )}
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
       <section className="section home-section">
         <div className="container">
           <SectionHeading
-            eyebrow="Most loved"
-            title="Best sellers"
-            description="The pieces customers keep coming back to."
+            eyebrow={bestSellersSection.eyebrow}
+            title={bestSellersSection.title}
+            description={bestSellersSection.description}
             linkLabel="Shop best sellers"
             linkTo="/best-sellers"
           />
-          <ProductGrid products={bestProducts.slice(0, 4)} />
+          <ProductSection status={productsStatus} products={bestProducts} emptyText="Best sellers will appear here." />
         </div>
       </section>
 
-      {/* Promotional Split Banner */}
       <PromotionalBanner />
 
-      <section className="testimonial-section">
-        <div className="container testimonial-layout">
-          <div>
-            <span className="eyebrow">Kind words</span>
-            <h2>
-              “The little details are what make every piece feel so special.”
-            </h2>
-            <span className="testimonial-author">— Meera, verified customer</span>
-          </div>
+      {testimonial.enabled && (
+        <section className="testimonial-section">
+          <div className="container testimonial-layout">
+            <div>
+              <span className="eyebrow">{testimonial.eyebrow}</span>
+              <h2>“{testimonial.quote}”</h2>
+              {testimonial.author && <span className="testimonial-author">— {testimonial.author}</span>}
+            </div>
 
-          <div className="testimonial-stats">
-            <div>
-              <strong>4.9</strong>
-              <span>Average rating</span>
-            </div>
-            <div>
-              <strong>500+</strong>
-              <span>Happy customers</span>
-            </div>
-            <div>
-              <strong>7 days</strong>
-              <span>Easy returns</span>
+            <div className="testimonial-stats">
+              <div>
+                <strong>{stats.averageRating ?? "—"}</strong>
+                <span>
+                  Average rating{stats.reviewCount ? ` (${stats.reviewCount})` : ""}
+                </span>
+              </div>
+              <div>
+                <strong>{stats.customerCount.toLocaleString()}</strong>
+                <span>Registered customers</span>
+              </div>
+              <div>
+                <strong>{commerce.returnWindowDays} days</strong>
+                <span>Easy returns</span>
+              </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
     </>
   );
 }

@@ -47,12 +47,9 @@ export default function ProductCard({
     if (isLoading || isAdded) return;
     setIsLoading(true);
 
-    // Realistic asynchronous dispatch delay with spinner
-    await new Promise((resolve) => setTimeout(resolve, 600));
-
-    addToCart(product, 1);
+    const added = await addToCart(product, 1);
     setIsLoading(false);
-    setIsAdded(true);
+    setIsAdded(added);
 
     setTimeout(() => {
       setIsAdded(false);
@@ -247,8 +244,14 @@ export default function ProductCard({
                   />
                 ))}
               </div>
-              <span className="rating-mini-value">{product.rating}</span>
-              <span className="rating-mini-count">({product.reviews})</span>
+              {product.reviews > 0 ? (
+                <>
+                  <span className="rating-mini-value">{product.rating}</span>
+                  <span className="rating-mini-count">({product.reviews})</span>
+                </>
+              ) : (
+                <span className="rating-mini-count">No reviews yet</span>
+              )}
             </div>
           </div>
 

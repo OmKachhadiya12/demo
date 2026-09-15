@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  BadGatewayException,
   Inject,
   Logger,
 } from '@nestjs/common';
@@ -15,113 +16,93 @@ import { CreatePaymentIntentDto } from './dto/create-intent.dto.js';
 import { VerifyPaymentDto } from './dto/verify-payment.dto.js';
 import { CodPaymentDto } from './dto/cod-payment.dto.js';
 import { Payment, PaymentDocument } from './schemas/payment.schema.js';
+import { getRazorpayCredentials } from '../../common/utils/payments.js';
+import { exactMatch } from '../../common/utils/regex.js';
 
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
   private readonly razorpay: any;
-  private readonly keyId: string;
-  private readonly keySecret: string;
+  private readonly credentials: ReturnType<typeof getRazorpayCredentials>;
 
   constructor(
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     @InjectModel(Payment.name) private readonly paymentModel: Model<PaymentDocument>,
     @Inject(ConfigService) private readonly configService: ConfigService,
   ) {
-    this.keyId =
-      this.configService.get<string>('RAZORPAY_KEY_ID') || 'rzp_test_lustre2026';
-    this.keySecret =
-      this.configService.get<string>('RAZORPAY_KEY_SECRET') ||
-      'lustre_secret_key_mock_9999';
+    this.credentials = getRazorpayCredentials(this.configService);
 
-    try {
+    if (this.credentials.configured) {
       this.razorpay = new Razorpay({
-        key_id: this.keyId,
-        key_secret: this.keySecret,
+        key_id: this.credentials.keyId,
+        key_secret: this.credentials.keySecret,
       });
-    } catch (err: any) {
-      this.logger.warn(`Razorpay client initialized with mock/fallback mode: ${err.message}`);
+    } else {
+      this.logger.warn(
+        'Razorpay credentials are not configured; online payments are disabled and checkout offers cash on delivery only.',
+      );
     }
   }
 
   getPublicKey() {
     return {
-      keyId: this.keyId,
+      enabled: this.credentials.configured,
+      keyId: this.credentials.configured ? this.credentials.keyId : null,
       currency: 'INR',
     };
   }
 
-  async createPaymentIntent(dto: CreatePaymentIntentDto) {
-    const order = await this.orderModel
-      .findOne({ orderId: new RegExp(`^${dto.orderId.trim()}$`, 'i') })
-      .exec();
+  private ensureConfigured() {
+    if (!this.credentials.configured) {
+      throw new BadRequestException('Online payments are not configured on this store.');
+    }
+  }
 
+  private async findOrder(orderId: string) {
+    const order = await this.orderModel.findOne({ orderId: exactMatch(orderId) }).exec();
     if (!order) {
-      throw new NotFoundException(`Order '${dto.orderId}' was not found.`);
+      throw new NotFoundException(`Order '${orderId}' was not found.`);
     }
+    return order;
+  }
 
+  async createPaymentIntent(dto: CreatePaymentIntentDto) {
+    this.ensureConfigured();
+    const order = await this.findOrder(dto.orderId);
+
+    if (order.payment?.method !== 'razorpay') {
+      throw new BadRequestException('This order was not placed with online payment.');
+    }
     if (order.payment?.status === 'paid') {
-      throw new BadRequestException(
-        `Order '${order.orderId}' has already been paid successfully.`,
-      );
+      throw new BadRequestException(`Order '${order.orderId}' has already been paid.`);
+    }
+    if (order.status === 'Cancelled') {
+      throw new BadRequestException('This order has been cancelled.');
     }
 
-    // Tamper-proof amount in paise (1 INR = 100 paise)
     const amountInPaise = Math.round(order.total * 100);
-    if (amountInPaise <= 0) {
-      throw new BadRequestException('Order amount must be greater than zero.');
-    }
 
     let razorpayOrderId: string;
-
-    // Use live Razorpay API if valid API keys configured, else safe dev mode fallback
-    const isMockKey =
-      !this.keyId ||
-      this.keyId.includes('test_lustre2026') ||
-      this.keyId === 'rzp_test_placeholder';
-
-    if (!isMockKey && this.razorpay) {
-      try {
-        const rzpOrder = await this.razorpay.orders.create({
-          amount: amountInPaise,
-          currency: dto.currency || 'INR',
-          receipt: order.orderId,
-          notes: {
-            orderId: order.orderId,
-            customerEmail: order.customer?.email || '',
-          },
-        });
-        razorpayOrderId = rzpOrder.id;
-      } catch (err: any) {
-        this.logger.warn(
-          `Razorpay live API order creation failed (${err.message}). Falling back to development session.`,
-        );
-        razorpayOrderId = 'order_' + crypto.randomBytes(10).toString('hex');
-      }
-    } else {
-      razorpayOrderId = 'order_' + crypto.randomBytes(10).toString('hex');
+    try {
+      const rzpOrder = await this.razorpay.orders.create({
+        amount: amountInPaise,
+        currency: dto.currency || 'INR',
+        receipt: order.orderId,
+        notes: { orderId: order.orderId },
+      });
+      razorpayOrderId = rzpOrder.id;
+    } catch (err: any) {
+      this.logger.error(`Razorpay order creation failed for ${order.orderId}: ${err?.error?.description || err.message}`);
+      throw new BadGatewayException('The payment gateway is unavailable. Please try again shortly.');
     }
 
-    // Persist razorpay session details on order
-    order.payment = {
-      ...order.payment,
-      method: 'razorpay',
-      status: 'pending',
-      razorpayOrderId,
-    };
+    order.payment = { ...order.payment, razorpayOrderId };
+    order.markModified('payment');
     await order.save();
-    await this.paymentModel.findOneAndUpdate(
+
+    await this.paymentModel.updateOne(
       { orderId: order.orderId },
-      {
-        order: order._id,
-        user: order.user,
-        amount: order.total,
-        currency: dto.currency || 'INR',
-        method: 'razorpay',
-        status: 'pending',
-        razorpayOrderId,
-      },
-      { upsert: true, returnDocument: 'after' },
+      { $set: { razorpayOrderId, status: 'pending', method: 'razorpay' } },
     );
 
     return {
@@ -130,128 +111,82 @@ export class PaymentsService {
       razorpayOrderId,
       amount: amountInPaise,
       currency: dto.currency || 'INR',
-      keyId: this.keyId,
+      keyId: this.credentials.keyId,
       customer: {
         name: order.customer?.fullName,
         email: order.customer?.email,
         phone: order.customer?.phone,
       },
-      notes: {
-        orderId: order.orderId,
-      },
     };
   }
 
   async verifyPayment(dto: VerifyPaymentDto) {
-    const text = `${dto.razorpayOrderId}|${dto.razorpayPaymentId}`;
-    const generatedSignature = crypto
-      .createHmac('sha256', this.keySecret)
-      .update(text)
+    this.ensureConfigured();
+    const order = await this.findOrder(dto.orderId);
+
+    if (order.payment?.razorpayOrderId !== dto.razorpayOrderId) {
+      throw new BadRequestException('Payment does not belong to this order.');
+    }
+
+    const expected = crypto
+      .createHmac('sha256', this.credentials.keySecret)
+      .update(`${dto.razorpayOrderId}|${dto.razorpayPaymentId}`)
       .digest('hex');
 
-    const isValid = generatedSignature === dto.razorpaySignature;
-    if (!isValid) {
-      throw new BadRequestException(
-        'Payment signature verification failed. Invalid cryptographic signature.',
-      );
+    const expectedBuf = Buffer.from(expected);
+    const receivedBuf = Buffer.from(dto.razorpaySignature);
+    if (expectedBuf.length !== receivedBuf.length || !crypto.timingSafeEqual(expectedBuf, receivedBuf)) {
+      throw new BadRequestException('Payment signature verification failed.');
     }
 
-    const order = await this.orderModel
-      .findOne({
-        $or: [
-          { orderId: new RegExp(`^${dto.orderId.trim()}$`, 'i') },
-          { 'payment.razorpayOrderId': dto.razorpayOrderId },
-        ],
-      })
-      .exec();
-
-    if (!order) {
-      throw new NotFoundException(
-        `Order '${dto.orderId}' not found for payment verification.`,
-      );
-    }
-
-    // Mark payment status = 'paid' and record audit metadata
+    const paidAt = new Date();
     order.payment = {
       ...order.payment,
-      method: 'razorpay',
       status: 'paid',
       transactionId: dto.razorpayPaymentId,
-      razorpayOrderId: dto.razorpayOrderId,
       razorpayPaymentId: dto.razorpayPaymentId,
       razorpaySignature: dto.razorpaySignature,
-      paidAt: new Date(),
+      paidAt,
     };
-    order.status = 'Confirmed';
+    order.statusHistory = [...(order.statusHistory || []), { status: order.status, note: 'Payment received', at: paidAt }];
+    order.markModified('payment');
     await order.save();
-    await this.paymentModel.findOneAndUpdate(
+
+    await this.paymentModel.updateOne(
       { orderId: order.orderId },
       {
-        order: order._id,
-        user: order.user,
-        amount: order.total,
-        currency: 'INR',
-        method: 'razorpay',
-        status: 'paid',
-        transactionId: dto.razorpayPaymentId,
-        razorpayOrderId: dto.razorpayOrderId,
-        razorpayPaymentId: dto.razorpayPaymentId,
-        razorpaySignature: dto.razorpaySignature,
-        paidAt: order.payment.paidAt,
+        $set: {
+          status: 'paid',
+          transactionId: dto.razorpayPaymentId,
+          razorpayOrderId: dto.razorpayOrderId,
+          razorpayPaymentId: dto.razorpayPaymentId,
+          razorpaySignature: dto.razorpaySignature,
+          paidAt,
+        },
       },
-      { upsert: true, returnDocument: 'after' },
     );
 
     return {
       success: true,
-      message: 'Payment verified and captured successfully.',
+      message: 'Payment verified successfully.',
       orderId: order.orderId,
       paymentStatus: 'paid',
       transactionId: dto.razorpayPaymentId,
-      order,
     };
   }
 
   async confirmCodPayment(dto: CodPaymentDto) {
-    const order = await this.orderModel
-      .findOne({ orderId: new RegExp(`^${dto.orderId.trim()}$`, 'i') })
-      .exec();
+    const order = await this.findOrder(dto.orderId);
 
-    if (!order) {
-      throw new NotFoundException(`Order '${dto.orderId}' was not found.`);
+    if (order.payment?.method !== 'cod') {
+      throw new BadRequestException('This order was not placed with cash on delivery.');
     }
-
-    order.payment = {
-      ...order.payment,
-      method: 'cod',
-      status: 'pending',
-      transactionId:
-        order.payment?.transactionId ||
-        'COD-' + Math.floor(100000000 + Math.random() * 900000000),
-    };
-    order.status = 'Confirmed';
-    await order.save();
-    await this.paymentModel.findOneAndUpdate(
-      { orderId: order.orderId },
-      {
-        order: order._id,
-        user: order.user,
-        amount: order.total,
-        currency: 'INR',
-        method: 'cod',
-        status: 'pending',
-        transactionId: order.payment.transactionId,
-      },
-      { upsert: true, returnDocument: 'after' },
-    );
 
     return {
       success: true,
-      message:
-        'Cash on Delivery selected. Payment will be collected upon shipment delivery.',
+      message: 'Cash on Delivery selected. Payment will be collected upon delivery.',
       orderId: order.orderId,
-      paymentStatus: 'pending',
-      order,
+      paymentStatus: order.payment.status,
     };
   }
 }

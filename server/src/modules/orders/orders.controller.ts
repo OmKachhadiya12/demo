@@ -6,7 +6,6 @@ import {
   Param,
   Query,
   UseGuards,
-  Req,
   Inject,
 } from '@nestjs/common';
 import {
@@ -19,67 +18,53 @@ import {
 import { OrdersService } from './orders.service.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
+import { OptionalJwtAuthGuard } from '../../common/guards/optional-jwt-auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import type { UserDocument } from '../users/schemas/user.schema.js';
-import { JwtService } from '@nestjs/jwt';
 
 @ApiTags('Orders')
 @Controller('orders')
 export class OrdersController {
-  constructor(
-    @Inject(OrdersService) private readonly ordersService: OrdersService,
-    @Inject(JwtService) private readonly jwtService: JwtService,
-  ) {}
+  constructor(@Inject(OrdersService) private readonly ordersService: OrdersService) {}
 
   @Post()
-  @ApiOperation({ summary: 'Place a new jewelry order (guest or authenticated)' })
-  @ApiResponse({ status: 201, description: 'Order placed with tamper-proof recalculation.' })
-  @ApiResponse({ status: 400, description: 'Empty cart or invalid item inventory.' })
-  async createOrder(@Body() dto: CreateOrderDto, @Req() req: any) {
-    let userId: string | undefined;
-    const authHeader = req.headers['authorization'];
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      try {
-        const token = authHeader.split(' ')[1];
-        const payload = this.jwtService.decode(token) as any;
-        if (payload && payload.sub) {
-          userId = payload.sub;
-        }
-      } catch {
-        // Treat as guest checkout if token parsing fails
-      }
-    }
-
-    return this.ordersService.createOrder(dto, userId);
+  @ApiBearerAuth()
+  @UseGuards(OptionalJwtAuthGuard)
+  @ApiOperation({ summary: 'Place an order (guest, or linked to the signed-in account)' })
+  @ApiResponse({ status: 201, description: 'Order placed with server-side price calculation.' })
+  @ApiResponse({ status: 400, description: 'Empty bag, unavailable item, or insufficient stock.' })
+  async createOrder(@Body() dto: CreateOrderDto, @CurrentUser() user?: UserDocument) {
+    return this.ordersService.createOrder(dto, user?._id as any);
   }
 
   @Get('my-orders')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
-  @ApiOperation({ summary: 'List past orders for authenticated customer dashboard' })
-  @ApiResponse({ status: 200, description: 'List of past customer orders.' })
+  @ApiOperation({ summary: 'List orders for the signed-in customer' })
   async getMyOrders(@CurrentUser() user: UserDocument) {
     return this.ordersService.getMyOrders(user._id);
   }
 
   @Get('track')
-  @ApiOperation({ summary: 'Public order tracking lookup by Order ID and Customer Email' })
+  @ApiOperation({ summary: 'Public order tracking lookup by Order ID and customer email' })
   @ApiQuery({ name: 'orderId', example: 'LST-89421056' })
   @ApiQuery({ name: 'email', example: 'eleanor@example.com' })
-  @ApiResponse({ status: 200, description: 'Order tracking stage and carrier info.' })
   @ApiResponse({ status: 404, description: 'Order not found.' })
-  async trackOrder(
-    @Query('orderId') orderId: string,
-    @Query('email') email: string,
-  ) {
+  async trackOrder(@Query('orderId') orderId: string, @Query('email') email: string) {
     return this.ordersService.trackOrder(orderId, email);
   }
 
   @Get(':orderId')
-  @ApiOperation({ summary: 'Get full details of an order for confirmation or display' })
-  @ApiResponse({ status: 200, description: 'Order details found.' })
-  @ApiResponse({ status: 404, description: 'Order not found.' })
-  async getOrderById(@Param('orderId') orderId: string) {
-    return this.ordersService.getOrderById(orderId);
+  @ApiBearerAuth()
+  @UseGuards(OptionalJwtAuthGuard)
+  @ApiOperation({ summary: 'Order details for its owner, an admin, or a matching ?email=' })
+  @ApiQuery({ name: 'email', required: false })
+  @ApiResponse({ status: 404, description: 'Order not found or not accessible.' })
+  async getOrderById(
+    @Param('orderId') orderId: string,
+    @Query('email') email: string | undefined,
+    @CurrentUser() user?: UserDocument,
+  ) {
+    return this.ordersService.getOrderForViewer(orderId, user, email);
   }
 }

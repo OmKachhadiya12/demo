@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ShieldCheck,
@@ -6,22 +6,36 @@ import {
   Check,
   ChevronRight,
   ChevronDown,
-  CreditCard,
   Wallet,
   Banknote,
-  Landmark,
-  Truck,
   ArrowLeft,
   AlertCircle,
-  Sparkles,
   ShoppingBag,
-  Loader2,
-  FileText,
-  HelpCircle
+  Loader2
 } from "lucide-react";
-import { formatPrice, products } from "../data/products";
+import { formatPrice } from "../data/products";
 import { useStore } from "../context/StoreContext";
-import api from "../services/api";
+import { useSettings } from "../context/SettingsContext";
+import api, { getErrorMessage } from "../services/api";
+import { payOrderOnline } from "../services/payments";
+
+const COUNTRIES = ["India", "United States", "United Kingdom", "Canada", "Australia", "United Arab Emirates", "Singapore"];
+
+function Field({ id, label, error, children, full = false }) {
+  return (
+    <div className={`checkout-field-wrap ${full ? "full-width" : ""}`}>
+      <label htmlFor={id}>
+        {label} <span className="required-star">*</span>
+      </label>
+      {children}
+      {error && (
+        <span className="field-error-msg" role="alert">
+          <AlertCircle size={13} /> {error}
+        </span>
+      )}
+    </div>
+  );
+}
 
 export default function Checkout() {
   const navigate = useNavigate();
@@ -34,230 +48,240 @@ export default function Checkout() {
     estimatedTax,
     cartTotal,
     placeOrder,
-    addToCart,
-    user
+    user,
+    authReady,
+    productsStatus,
+    showToast
   } = useStore();
+  const { settings } = useSettings();
+  const { commerce, payments, store } = settings;
 
-  // Step state: 1 = Shipping, 2 = Payment, 3 = Order Review
+  const paymentOptions = [payments.onlineEnabled && "razorpay", payments.codEnabled && "cod"].filter(Boolean);
+
   const [step, setStep] = useState(1);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
   const [mobileSummaryOpen, setMobileSummaryOpen] = useState(false);
+  const [savedAddresses, setSavedAddresses] = useState([]);
 
-  // Step 1: Shipping form data
   const [shippingData, setShippingData] = useState({
-    fullName: user?.name || "Eleanor Vance",
-    email: user?.email || "eleanor.vance@example.com",
-    phone: "9876543210",
+    fullName: user?.name || "",
+    email: user?.email || "",
+    phone: user?.phone || "",
     country: "India",
-    city: "Mumbai",
-    state: "Maharashtra",
-    postalCode: "400001",
-    address: "42 Heritage Boulevard, Colaba",
-    isGuest: !user,
+    city: "",
+    state: "",
+    postalCode: "",
+    address: "",
     saveAddress: true
   });
-
-  // Step 2: Payment form data
-  const [paymentData, setPaymentData] = useState({
-    method: "card", // "card" | "wallet" | "cod" | "netbanking"
-    cardNumber: "4532 •••• •••• 8892",
-    cardName: "ELEANOR VANCE",
-    cardExpiry: "08/29",
-    cardCvv: "882",
-    selectedWallet: "applepay",
-    selectedBank: "hdfc"
-  });
-
-  // Step 3: Review form data
-  const [reviewData, setReviewData] = useState({
-    deliveryOption: "standard", // "standard" (Free) | "express" (₹199)
-    agreedToTerms: false,
-    orderNotes: ""
-  });
-
+  const [paymentMethod, setPaymentMethod] = useState(paymentOptions[0] || "");
+  const [deliveryOption, setDeliveryOption] = useState("standard");
+  const [notes, setNotes] = useState("");
+  const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [errors, setErrors] = useState({});
 
-  // Calculate express delivery surcharge if selected
-  const deliverySurcharge = reviewData.deliveryOption === "express" ? 199 : 0;
+  // Prefill from the signed-in customer's profile and default address.
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    api
+      .get("/users/profile")
+      .then(({ data }) => {
+        if (!active) return;
+        setSavedAddresses(data.addresses || []);
+        const preferred = (data.addresses || []).find((a) => a.isDefault) || data.addresses?.[0];
+        setShippingData((prev) => ({
+          ...prev,
+          fullName: prev.fullName || data.name || "",
+          email: prev.email || data.email || "",
+          phone: prev.phone || preferred?.phone || data.phone || "",
+          ...(preferred && !prev.address
+            ? {
+                address: preferred.address,
+                city: preferred.city,
+                state: preferred.state,
+                postalCode: preferred.postalCode,
+                country: preferred.country || "India"
+              }
+            : {})
+        }));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [user]);
+
+  const deliverySurcharge = deliveryOption === "express" ? commerce.expressShippingFee : 0;
   const grandTotal = cartTotal + deliverySurcharge;
 
-  // Handle shipping input changes
   function handleShippingChange(e) {
     const { name, value, type, checked } = e.target;
+    setShippingData((prev) => ({ ...prev, [name]: type === "checkbox" ? checked : value }));
+    if (errors[name]) {
+      setErrors((prev) => {
+        const next = { ...prev };
+        delete next[name];
+        return next;
+      });
+    }
+  }
+
+  function applySavedAddress(addr) {
     setShippingData((prev) => ({
       ...prev,
-      [name]: type === "checkbox" ? checked : value
+      fullName: addr.fullName || prev.fullName,
+      phone: addr.phone || prev.phone,
+      address: addr.address,
+      city: addr.city,
+      state: addr.state,
+      postalCode: addr.postalCode,
+      country: addr.country || "India"
     }));
-
-    if (errors[name]) {
-      setErrors((prev) => {
-        const next = { ...prev };
-        delete next[name];
-        return next;
-      });
-    }
+    setErrors({});
   }
 
-  // Handle payment input changes
-  function handlePaymentChange(e) {
-    const { name, value } = e.target;
-    setPaymentData((prev) => ({
-      ...prev,
-      [name]: value
-    }));
-
-    if (errors[name]) {
-      setErrors((prev) => {
-        const next = { ...prev };
-        delete next[name];
-        return next;
-      });
-    }
-  }
-
-  // Validate Step 1 (Shipping Information)
   function validateShipping() {
-    const newErrors = {};
-
-    if (!shippingData.fullName.trim()) {
-      newErrors.fullName = "Full name is required";
-    }
-
-    if (!shippingData.email.trim()) {
-      newErrors.email = "Email address is required";
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(shippingData.email.trim())) {
-      newErrors.email = "Please enter a valid email address";
-    }
-
-    if (!shippingData.phone.trim()) {
-      newErrors.phone = "Phone number is required";
-    } else if (shippingData.phone.replace(/\D/g, "").length < 10) {
-      newErrors.phone = "Enter a valid 10-digit phone number";
-    }
-
-    if (!shippingData.country.trim()) {
-      newErrors.country = "Country is required";
-    }
-
-    if (!shippingData.city.trim()) {
-      newErrors.city = "City is required";
-    }
-
-    if (!shippingData.state.trim()) {
-      newErrors.state = "State / Province is required";
-    }
-
-    if (!shippingData.postalCode.trim()) {
-      newErrors.postalCode = "Postal code is required";
-    } else if (shippingData.postalCode.trim().length < 5) {
-      newErrors.postalCode = "Enter a valid postal code (5–6 digits)";
-    }
-
-    if (!shippingData.address.trim()) {
-      newErrors.address = "Complete address is required";
-    }
-
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    const next = {};
+    const d = shippingData;
+    if (!d.fullName.trim()) next.fullName = "Full name is required";
+    if (!d.email.trim()) next.email = "Email address is required";
+    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(d.email.trim())) next.email = "Please enter a valid email address";
+    if (!d.phone.trim()) next.phone = "Phone number is required";
+    else if (d.phone.replace(/\D/g, "").length < 10) next.phone = "Enter a valid 10-digit phone number";
+    if (!d.country.trim()) next.country = "Country is required";
+    if (!d.city.trim()) next.city = "City is required";
+    if (!d.state.trim()) next.state = "State is required";
+    if (!d.postalCode.trim()) next.postalCode = "Postal code is required";
+    else if (d.postalCode.trim().length < 5) next.postalCode = "Enter a valid postal code";
+    if (!d.address.trim()) next.address = "Complete address is required";
+    setErrors(next);
+    return Object.keys(next).length === 0;
   }
 
-  // Validate Step 2 (Payment Information)
   function validatePayment() {
-    const newErrors = {};
-
-    if (paymentData.method === "card") {
-      if (!paymentData.cardNumber.trim()) {
-        newErrors.cardNumber = "Card number is required";
-      }
-      if (!paymentData.cardName.trim()) {
-        newErrors.cardName = "Cardholder name is required";
-      }
-      if (!paymentData.cardExpiry.trim()) {
-        newErrors.cardExpiry = "Expiry date is required";
-      }
-      if (!paymentData.cardCvv.trim()) {
-        newErrors.cardCvv = "CVV is required";
-      }
+    if (!paymentMethod) {
+      setErrors({ payment: "No payment method is available right now. Please contact support." });
+      return false;
     }
-
-    setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    setErrors({});
+    return true;
   }
 
-  // Step progression handlers
-  function proceedToPayment(e) {
-    e.preventDefault();
-    if (validateShipping()) {
-      setStep(2);
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
+  function goTo(nextStep) {
+    setStep(nextStep);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function proceedToReview(e) {
-    e.preventDefault();
-    if (validatePayment()) {
-      setStep(3);
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
-  }
-
-  // Final Order Submission Handler
   async function handlePlaceOrder(e) {
     e.preventDefault();
-
-    if (!reviewData.agreedToTerms) {
-      setErrors({
-        terms: "You must accept the Terms and Privacy Policy to place your order"
-      });
+    if (!agreedToTerms) {
+      setErrors({ terms: "You must accept the Terms and Privacy Policy to place your order" });
+      return;
+    }
+    if (!validateShipping() || !validatePayment()) {
+      setStep(!validateShipping() ? 1 : 2);
       return;
     }
 
     setIsSubmitting(true);
+    setSubmitError("");
 
-    // Realistic secure processing animation
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-
-    const orderPayload = {
-      shipping: shippingData,
-      payment: {
-        method: paymentData.method,
-        cardLast4:
-          paymentData.method === "card"
-            ? paymentData.cardNumber.slice(-4)
-            : undefined
-      },
-      deliveryOption: reviewData.deliveryOption,
-      notes: reviewData.orderNotes,
-      total: grandTotal
+    const d = shippingData;
+    const shippingAddress = {
+      address: d.address.trim(),
+      city: d.city.trim(),
+      state: d.state.trim(),
+      postalCode: d.postalCode.trim(),
+      country: d.country
     };
 
     try {
-      const createdOrder = await placeOrder(orderPayload);
-      const orderId = createdOrder?.orderId || createdOrder?.id;
-
-      if (orderId && paymentData.method === "cod") {
-        await api.post("/payments/cod", { orderId });
-      } else if (orderId) {
-        await api.post("/payments/create-intent", { orderId, currency: "INR" });
+      if (user && d.saveAddress) {
+        const alreadySaved = savedAddresses.some(
+          (a) => a.address === shippingAddress.address && a.postalCode === shippingAddress.postalCode
+        );
+        if (!alreadySaved) {
+          await api
+            .post("/users/addresses", { fullName: d.fullName.trim(), phone: d.phone.trim(), ...shippingAddress })
+            .catch(() => {});
+        }
       }
 
-      setIsSubmitting(false);
-      const targetId = orderId || "LST-89421056";
-      navigate(`/order-confirmation/${targetId}`);
-    } catch {
+      const order = await placeOrder({
+        customer: { fullName: d.fullName.trim(), email: d.email.trim(), phone: d.phone.trim() },
+        shippingAddress,
+        deliveryOption,
+        paymentMethod,
+        notes
+      });
+
+      if (paymentMethod === "razorpay") {
+        try {
+          const result = await payOrderOnline(order, store.name);
+          showToast(
+            result === "paid"
+              ? "Payment received. Thank you!"
+              : "Payment not completed. Your order is saved — you can pay from the confirmation page.",
+            result === "paid" ? "success" : "error"
+          );
+        } catch (err) {
+          showToast(getErrorMessage(err, "Payment could not be completed. You can retry from the confirmation page."), "error");
+        }
+      } else {
+        showToast("Your order has been placed!", "success");
+      }
+
+      navigate(`/order-confirmation/${order.orderId}`);
+    } catch (err) {
+      setSubmitError(getErrorMessage(err, "We could not place your order. Please try again."));
+    } finally {
       setIsSubmitting(false);
     }
   }
 
-  // Sample order fallback for testing if cart was cleared
-  function handleAddSampleCart() {
-    const flagship = products.find((p) => p.id === "p0") || products[0];
-    addToCart({ ...flagship, selectedColor: "Gold" }, 1);
+  const summaryLines = (
+    <>
+      <div className="summary-line">
+        <span>Subtotal</span>
+        <strong>{formatPrice(cartSubtotal)}</strong>
+      </div>
+      {appliedPromo && discountAmount > 0 && (
+        <div className="summary-line discount">
+          <span>Promo ({appliedPromo.code})</span>
+          <span>-{formatPrice(discountAmount)}</span>
+        </div>
+      )}
+      <div className="summary-line">
+        <span>Shipping</span>
+        <strong>{shipping === 0 ? "FREE" : formatPrice(shipping)}</strong>
+      </div>
+      {deliverySurcharge > 0 && (
+        <div className="summary-line">
+          <span>Express Delivery</span>
+          <strong>{formatPrice(deliverySurcharge)}</strong>
+        </div>
+      )}
+      <div className="summary-line">
+        <span>GST ({commerce.taxPercent}%)</span>
+        <strong>{formatPrice(estimatedTax)}</strong>
+      </div>
+    </>
+  );
+
+  if (!authReady || productsStatus === "loading") {
+    return (
+      <section className="section">
+        <div className="container">
+          <p className="catalog-loading">Preparing checkout…</p>
+        </div>
+      </section>
+    );
   }
 
   return (
     <div className="checkout-page">
-      {/* Breadcrumbs Navigation */}
       <nav className="pdp-breadcrumbs-bar" aria-label="Breadcrumb">
         <div className="container">
           <ol className="pdp-breadcrumbs-list">
@@ -278,108 +302,54 @@ export default function Checkout() {
 
       <section className="section checkout-section">
         <div className="container">
-          {/* Empty Cart Notice */}
           {cart.length === 0 ? (
             <div className="cart-empty-container">
               <div className="cart-empty-icon-wrap">
                 <ShoppingBag size={42} strokeWidth={1.2} />
               </div>
               <h2>Your bag is currently empty</h2>
-              <p>
-                Add pieces to your bag before checking out. You can also populate a demo piece
-                to test this checkout flow instantly.
-              </p>
+              <p>Add pieces to your bag before checking out.</p>
               <div className="cart-empty-actions">
                 <Link to="/shop" className="button button-dark">
                   Explore Shop
                 </Link>
-                <button
-                  type="button"
-                  className="button button-gold"
-                  onClick={handleAddSampleCart}
-                  id="checkout-demo-item-btn"
-                >
-                  <Sparkles size={16} />
-                  Add Aurora Necklace (Demo)
-                </button>
               </div>
             </div>
           ) : (
             <>
-              {/* Mobile Collapsible Order Summary Bar */}
               <div className="checkout-mobile-summary-bar">
                 <button
                   type="button"
                   className="checkout-mobile-summary-toggle"
                   onClick={() => setMobileSummaryOpen(!mobileSummaryOpen)}
                   aria-expanded={mobileSummaryOpen}
-                  aria-controls="mobile-order-summary-panel"
-                  id="checkout-mobile-summary-toggle"
                 >
                   <div className="checkout-mobile-toggle-left">
                     <ShoppingBag size={18} />
-                    <span>
-                      {mobileSummaryOpen ? "Hide order summary" : "Show order summary"}
-                    </span>
-                    <ChevronDown
-                      size={16}
-                      className={`checkout-chevron-icon ${
-                        mobileSummaryOpen ? "rotate" : ""
-                      }`}
-                    />
+                    <span>{mobileSummaryOpen ? "Hide order summary" : "Show order summary"}</span>
+                    <ChevronDown size={16} className={`checkout-chevron-icon ${mobileSummaryOpen ? "rotate" : ""}`} />
                   </div>
-                  <strong className="checkout-mobile-total-price">
-                    {formatPrice(grandTotal)}
-                  </strong>
+                  <strong className="checkout-mobile-total-price">{formatPrice(grandTotal)}</strong>
                 </button>
 
-                {/* Collapsible drawer */}
                 {mobileSummaryOpen && (
-                  <div
-                    className="checkout-mobile-summary-drawer"
-                    id="mobile-order-summary-panel"
-                  >
+                  <div className="checkout-mobile-summary-drawer">
                     <div className="checkout-summary-items-list">
                       {cart.map((item) => (
                         <div key={item.id} className="checkout-mini-item">
-                          <img
-                            src={item.product?.image || item.product?.gallery?.[0]}
-                            alt={item.product?.name}
-                          />
+                          <img src={item.product.image} alt={item.product.name} />
                           <div className="checkout-mini-item-info">
-                            <h5>{item.product?.name}</h5>
+                            <h5>{item.product.name}</h5>
                             <span>
-                              Color: {item.selectedColor || "Gold"} • Qty: {item.quantity}
+                              {item.selectedColor} • Qty: {item.quantity}
                             </span>
                           </div>
-                          <strong>
-                            {formatPrice(
-                              (item.product?.price || 0) * item.quantity
-                            )}
-                          </strong>
+                          <strong>{formatPrice(item.product.price * item.quantity)}</strong>
                         </div>
                       ))}
                     </div>
-
-                    <div className="checkout-mini-totals">
-                      <div className="checkout-mini-row">
-                        <span>Subtotal</span>
-                        <span>{formatPrice(cartSubtotal)}</span>
-                      </div>
-                      {appliedPromo && discountAmount > 0 && (
-                        <div className="checkout-mini-row discount">
-                          <span>Discount ({appliedPromo.code})</span>
-                          <span>-{formatPrice(discountAmount)}</span>
-                        </div>
-                      )}
-                      <div className="checkout-mini-row">
-                        <span>Shipping</span>
-                        <span>{shipping === 0 ? "FREE" : formatPrice(shipping)}</span>
-                      </div>
-                      <div className="checkout-mini-row">
-                        <span>Estimated Tax (3% GST)</span>
-                        <span>{formatPrice(estimatedTax)}</span>
-                      </div>
+                    <div className="checkout-mini-totals summary-breakdown">
+                      {summaryLines}
                       <div className="checkout-mini-row total">
                         <strong>Total</strong>
                         <strong>{formatPrice(grandTotal)}</strong>
@@ -389,54 +359,36 @@ export default function Checkout() {
                 )}
               </div>
 
-              {/* Main 2-Column Split: Wizard (Left) & Order Summary (Right) */}
               <div className="checkout-grid-layout">
                 <div className="checkout-main-column">
-                  {/* Three-Step Progress Header */}
                   <div className="checkout-step-progress" aria-label="Checkout Progress">
                     <button
                       type="button"
-                      className={`checkout-step-tab ${step === 1 ? "is-active" : ""} ${
-                        step > 1 ? "is-completed" : ""
-                      }`}
-                      onClick={() => setStep(1)}
+                      className={`checkout-step-tab ${step === 1 ? "is-active" : ""} ${step > 1 ? "is-completed" : ""}`}
+                      onClick={() => goTo(1)}
                     >
-                      <span className="step-number">
-                        {step > 1 ? <Check size={14} /> : "1"}
-                      </span>
+                      <span className="step-number">{step > 1 ? <Check size={14} /> : "1"}</span>
                       <span className="step-title">Shipping Information</span>
                     </button>
-
                     <span className="step-arrow-divider">
                       <ChevronRight size={16} />
                     </span>
-
                     <button
                       type="button"
-                      className={`checkout-step-tab ${step === 2 ? "is-active" : ""} ${
-                        step > 2 ? "is-completed" : ""
-                      }`}
-                      onClick={() => {
-                        if (validateShipping()) setStep(2);
-                      }}
+                      className={`checkout-step-tab ${step === 2 ? "is-active" : ""} ${step > 2 ? "is-completed" : ""}`}
+                      onClick={() => validateShipping() && goTo(2)}
                       disabled={step < 2}
                     >
-                      <span className="step-number">
-                        {step > 2 ? <Check size={14} /> : "2"}
-                      </span>
-                      <span className="step-title">Payment Information</span>
+                      <span className="step-number">{step > 2 ? <Check size={14} /> : "2"}</span>
+                      <span className="step-title">Payment Method</span>
                     </button>
-
                     <span className="step-arrow-divider">
                       <ChevronRight size={16} />
                     </span>
-
                     <button
                       type="button"
                       className={`checkout-step-tab ${step === 3 ? "is-active" : ""}`}
-                      onClick={() => {
-                        if (validateShipping() && validatePayment()) setStep(3);
-                      }}
+                      onClick={() => validateShipping() && validatePayment() && goTo(3)}
                       disabled={step < 3}
                     >
                       <span className="step-number">3</span>
@@ -444,238 +396,99 @@ export default function Checkout() {
                     </button>
                   </div>
 
-                  {/* ==================================================== */}
-                  {/* STEP 1: SHIPPING INFORMATION                         */}
-                  {/* ==================================================== */}
                   {step === 1 && (
                     <div className="checkout-step-content" id="step-shipping-section">
                       <div className="checkout-step-heading">
                         <h2>1. Shipping Information</h2>
-                        <p className="checkout-step-sub">
-                          Please enter the delivery address where your pieces will be sent.
-                        </p>
+                        <p className="checkout-step-sub">Where should we deliver your pieces?</p>
                       </div>
 
-                      {/* Guest Checkout Option Banner */}
-                      <div className="checkout-guest-banner">
-                        <div className="checkout-guest-info">
-                          <strong>Checkout as Guest</strong>
-                          <span>No account or password required. Track anytime with your email.</span>
+                      {!user && (
+                        <div className="checkout-guest-banner">
+                          <div className="checkout-guest-info">
+                            <strong>Checking out as a guest</strong>
+                            <span>
+                              You can track this order with your email.{" "}
+                              <Link to="/account/login" state={{ from: "/checkout" }}>
+                                Sign in
+                              </Link>{" "}
+                              to save it to your account.
+                            </span>
+                          </div>
                         </div>
-                        <span className="checkout-guest-badge">Guest Mode Active</span>
-                      </div>
+                      )}
 
-                      <form onSubmit={proceedToPayment} noValidate className="checkout-form-body">
-                        <div className="checkout-form-grid">
-                          {/* Full Name */}
-                          <div className="checkout-field-wrap">
-                            <label htmlFor="fullName">
-                              Full Name <span className="required-star">*</span>
-                            </label>
-                            <input
-                              type="text"
-                              id="fullName"
-                              name="fullName"
-                              value={shippingData.fullName}
-                              onChange={handleShippingChange}
-                              placeholder="e.g. Eleanor Vance"
-                              className={errors.fullName ? "has-error" : ""}
-                              required
-                            />
-                            {errors.fullName && (
-                              <span className="field-error-msg" role="alert">
-                                <AlertCircle size={13} /> {errors.fullName}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Email Address */}
-                          <div className="checkout-field-wrap">
-                            <label htmlFor="email">
-                              Email Address <span className="required-star">*</span>
-                            </label>
-                            <input
-                              type="email"
-                              id="email"
-                              name="email"
-                              value={shippingData.email}
-                              onChange={handleShippingChange}
-                              placeholder="e.g. eleanor@example.com"
-                              className={errors.email ? "has-error" : ""}
-                              required
-                            />
-                            {errors.email && (
-                              <span className="field-error-msg" role="alert">
-                                <AlertCircle size={13} /> {errors.email}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Phone Number */}
-                          <div className="checkout-field-wrap">
-                            <label htmlFor="phone">
-                              Phone Number <span className="required-star">*</span>
-                            </label>
-                            <input
-                              type="tel"
-                              id="phone"
-                              name="phone"
-                              value={shippingData.phone}
-                              onChange={handleShippingChange}
-                              placeholder="10-digit mobile number"
-                              className={errors.phone ? "has-error" : ""}
-                              required
-                            />
-                            {errors.phone && (
-                              <span className="field-error-msg" role="alert">
-                                <AlertCircle size={13} /> {errors.phone}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Country */}
-                          <div className="checkout-field-wrap">
-                            <label htmlFor="country">
-                              Country <span className="required-star">*</span>
-                            </label>
-                            <select
-                              id="country"
-                              name="country"
-                              value={shippingData.country}
-                              onChange={handleShippingChange}
-                              className={errors.country ? "has-error" : ""}
-                              required
+                      {savedAddresses.length > 0 && (
+                        <div className="checkout-saved-addresses">
+                          <span className="checkout-saved-label">Use a saved address:</span>
+                          {savedAddresses.map((addr) => (
+                            <button
+                              key={addr._id}
+                              type="button"
+                              className="button button-outline-dark button-sm"
+                              onClick={() => applySavedAddress(addr)}
                             >
-                              <option value="India">India</option>
-                              <option value="United States">United States</option>
-                              <option value="United Kingdom">United Kingdom</option>
-                              <option value="Canada">Canada</option>
-                              <option value="Australia">Australia</option>
-                              <option value="United Arab Emirates">United Arab Emirates</option>
-                              <option value="Singapore">Singapore</option>
+                              {addr.address}, {addr.city}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (validateShipping()) goTo(2);
+                        }}
+                        noValidate
+                        className="checkout-form-body"
+                      >
+                        <div className="checkout-form-grid">
+                          <Field id="fullName" label="Full Name" error={errors.fullName}>
+                            <input id="fullName" name="fullName" value={shippingData.fullName} onChange={handleShippingChange} className={errors.fullName ? "has-error" : ""} autoComplete="name" />
+                          </Field>
+                          <Field id="email" label="Email Address" error={errors.email}>
+                            <input id="email" type="email" name="email" value={shippingData.email} onChange={handleShippingChange} className={errors.email ? "has-error" : ""} autoComplete="email" />
+                          </Field>
+                          <Field id="phone" label="Phone Number" error={errors.phone}>
+                            <input id="phone" type="tel" name="phone" value={shippingData.phone} onChange={handleShippingChange} className={errors.phone ? "has-error" : ""} autoComplete="tel" />
+                          </Field>
+                          <Field id="country" label="Country" error={errors.country}>
+                            <select id="country" name="country" value={shippingData.country} onChange={handleShippingChange}>
+                              {COUNTRIES.map((c) => (
+                                <option key={c} value={c}>
+                                  {c}
+                                </option>
+                              ))}
                             </select>
-                            {errors.country && (
-                              <span className="field-error-msg" role="alert">
-                                <AlertCircle size={13} /> {errors.country}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Complete Address */}
-                          <div className="checkout-field-wrap full-width">
-                            <label htmlFor="address">
-                              Complete Address (Flat, House no., Street, Area){" "}
-                              <span className="required-star">*</span>
-                            </label>
-                            <textarea
-                              id="address"
-                              name="address"
-                              rows={2}
-                              value={shippingData.address}
-                              onChange={handleShippingChange}
-                              placeholder="e.g. Flat 402, Radiant Towers, Linking Road"
-                              className={errors.address ? "has-error" : ""}
-                              required
-                            />
-                            {errors.address && (
-                              <span className="field-error-msg" role="alert">
-                                <AlertCircle size={13} /> {errors.address}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* City */}
-                          <div className="checkout-field-wrap">
-                            <label htmlFor="city">
-                              City <span className="required-star">*</span>
-                            </label>
-                            <input
-                              type="text"
-                              id="city"
-                              name="city"
-                              value={shippingData.city}
-                              onChange={handleShippingChange}
-                              placeholder="e.g. Mumbai"
-                              className={errors.city ? "has-error" : ""}
-                              required
-                            />
-                            {errors.city && (
-                              <span className="field-error-msg" role="alert">
-                                <AlertCircle size={13} /> {errors.city}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* State */}
-                          <div className="checkout-field-wrap">
-                            <label htmlFor="state">
-                              State <span className="required-star">*</span>
-                            </label>
-                            <input
-                              type="text"
-                              id="state"
-                              name="state"
-                              value={shippingData.state}
-                              onChange={handleShippingChange}
-                              placeholder="e.g. Maharashtra"
-                              className={errors.state ? "has-error" : ""}
-                              required
-                            />
-                            {errors.state && (
-                              <span className="field-error-msg" role="alert">
-                                <AlertCircle size={13} /> {errors.state}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Postal Code */}
-                          <div className="checkout-field-wrap">
-                            <label htmlFor="postalCode">
-                              Postal Code <span className="required-star">*</span>
-                            </label>
-                            <input
-                              type="text"
-                              id="postalCode"
-                              name="postalCode"
-                              value={shippingData.postalCode}
-                              onChange={handleShippingChange}
-                              placeholder="e.g. 400001"
-                              className={errors.postalCode ? "has-error" : ""}
-                              required
-                            />
-                            {errors.postalCode && (
-                              <span className="field-error-msg" role="alert">
-                                <AlertCircle size={13} /> {errors.postalCode}
-                              </span>
-                            )}
-                          </div>
+                          </Field>
+                          <Field id="address" label="Complete Address (Flat, House no., Street, Area)" error={errors.address} full>
+                            <textarea id="address" name="address" rows={2} value={shippingData.address} onChange={handleShippingChange} className={errors.address ? "has-error" : ""} autoComplete="street-address" />
+                          </Field>
+                          <Field id="city" label="City" error={errors.city}>
+                            <input id="city" name="city" value={shippingData.city} onChange={handleShippingChange} className={errors.city ? "has-error" : ""} autoComplete="address-level2" />
+                          </Field>
+                          <Field id="state" label="State" error={errors.state}>
+                            <input id="state" name="state" value={shippingData.state} onChange={handleShippingChange} className={errors.state ? "has-error" : ""} autoComplete="address-level1" />
+                          </Field>
+                          <Field id="postalCode" label="Postal Code" error={errors.postalCode}>
+                            <input id="postalCode" name="postalCode" value={shippingData.postalCode} onChange={handleShippingChange} className={errors.postalCode ? "has-error" : ""} autoComplete="postal-code" />
+                          </Field>
                         </div>
 
-                        {/* Save Address Checkbox */}
-                        <div className="checkout-checkbox-row">
-                          <label className="checkout-checkbox-label">
-                            <input
-                              type="checkbox"
-                              name="saveAddress"
-                              checked={shippingData.saveAddress}
-                              onChange={handleShippingChange}
-                              id="save-address-checkbox"
-                            />
-                            <span>Save this address for future purchases</span>
-                          </label>
-                        </div>
+                        {user && (
+                          <div className="checkout-checkbox-row">
+                            <label className="checkout-checkbox-label">
+                              <input type="checkbox" name="saveAddress" checked={shippingData.saveAddress} onChange={handleShippingChange} />
+                              <span>Save this address to my account</span>
+                            </label>
+                          </div>
+                        )}
 
-                        {/* Step 1 Actions */}
                         <div className="checkout-step-footer">
                           <Link to="/cart" className="checkout-back-link">
                             <ArrowLeft size={16} /> Return to Cart
                           </Link>
-
-                          <button
-                            type="submit"
-                            className="button button-dark checkout-continue-btn"
-                            id="continue-to-payment-btn"
-                          >
+                          <button type="submit" className="button button-dark checkout-continue-btn" id="continue-to-payment-btn">
                             <span>Continue to Payment</span>
                             <ChevronRight size={16} />
                           </button>
@@ -684,272 +497,80 @@ export default function Checkout() {
                     </div>
                   )}
 
-                  {/* ==================================================== */}
-                  {/* STEP 2: PAYMENT INFORMATION                          */}
-                  {/* ==================================================== */}
                   {step === 2 && (
                     <div className="checkout-step-content" id="step-payment-section">
                       <div className="checkout-step-heading">
-                        <h2>2. Payment Information</h2>
-                        <p className="checkout-step-sub">
-                          All transactions are encrypted and secured with bank-grade protocols.
-                        </p>
+                        <h2>2. Payment Method</h2>
+                        <p className="checkout-step-sub">Choose how you would like to pay.</p>
                       </div>
 
-                      {/* Shipping Summary Pill */}
                       <div className="checkout-summary-pill">
                         <div className="pill-content">
                           <span className="pill-label">Ship to:</span>
                           <span className="pill-val">
-                            {shippingData.fullName}, {shippingData.address}, {shippingData.city},{" "}
-                            {shippingData.postalCode}
+                            {shippingData.fullName}, {shippingData.address}, {shippingData.city}, {shippingData.postalCode}
                           </span>
                         </div>
-                        <button
-                          type="button"
-                          className="pill-edit-btn"
-                          onClick={() => setStep(1)}
-                        >
+                        <button type="button" className="pill-edit-btn" onClick={() => goTo(1)}>
                           Change
                         </button>
                       </div>
 
-                      <form onSubmit={proceedToReview} className="checkout-form-body">
-                        {/* 4 Payment Options */}
-                        <div className="payment-options-grid">
-                          {/* Option 1: Credit or Debit Card */}
-                          <label
-                            className={`payment-method-card ${
-                              paymentData.method === "card" ? "is-selected" : ""
-                            }`}
-                          >
-                            <div className="payment-method-top">
-                              <input
-                                type="radio"
-                                name="method"
-                                value="card"
-                                checked={paymentData.method === "card"}
-                                onChange={handlePaymentChange}
-                                id="payment-method-card"
-                              />
-                              <div className="payment-method-info">
-                                <span className="payment-method-name">Credit or Debit Card</span>
-                                <span className="payment-method-desc">
-                                  Visa, Mastercard, RuPay, American Express
-                                </span>
-                              </div>
-                              <CreditCard size={20} className="payment-method-icon" />
-                            </div>
-
-                            {paymentData.method === "card" && (
-                              <div className="payment-card-subfields">
-                                <div className="checkout-field-wrap">
-                                  <label htmlFor="cardNumber">Card Number</label>
-                                  <input
-                                    type="text"
-                                    id="cardNumber"
-                                    name="cardNumber"
-                                    value={paymentData.cardNumber}
-                                    onChange={handlePaymentChange}
-                                    placeholder="4532 •••• •••• 8892"
-                                  />
-                                </div>
-
-                                <div className="checkout-field-wrap">
-                                  <label htmlFor="cardName">Name on Card</label>
-                                  <input
-                                    type="text"
-                                    id="cardName"
-                                    name="cardName"
-                                    value={paymentData.cardName}
-                                    onChange={handlePaymentChange}
-                                    placeholder="ELEANOR VANCE"
-                                  />
-                                </div>
-
-                                <div className="payment-two-cols">
-                                  <div className="checkout-field-wrap">
-                                    <label htmlFor="cardExpiry">Expiry Date</label>
-                                    <input
-                                      type="text"
-                                      id="cardExpiry"
-                                      name="cardExpiry"
-                                      value={paymentData.cardExpiry}
-                                      onChange={handlePaymentChange}
-                                      placeholder="MM/YY"
-                                    />
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (validatePayment()) goTo(3);
+                        }}
+                        className="checkout-form-body"
+                      >
+                        {paymentOptions.length === 0 ? (
+                          <p className="inline-alert inline-alert-error">
+                            No payment methods are currently available. Please contact {store.supportEmail}.
+                          </p>
+                        ) : (
+                          <div className="payment-options-grid">
+                            {payments.onlineEnabled && (
+                              <label className={`payment-method-card ${paymentMethod === "razorpay" ? "is-selected" : ""}`}>
+                                <div className="payment-method-top">
+                                  <input type="radio" name="method" value="razorpay" checked={paymentMethod === "razorpay"} onChange={() => setPaymentMethod("razorpay")} />
+                                  <div className="payment-method-info">
+                                    <span className="payment-method-name">Pay Online</span>
+                                    <span className="payment-method-desc">UPI, cards, net banking, and wallets via Razorpay</span>
                                   </div>
-
-                                  <div className="checkout-field-wrap">
-                                    <label htmlFor="cardCvv">CVV</label>
-                                    <input
-                                      type="password"
-                                      id="cardCvv"
-                                      name="cardCvv"
-                                      maxLength={4}
-                                      value={paymentData.cardCvv}
-                                      onChange={handlePaymentChange}
-                                      placeholder="•••"
-                                    />
-                                  </div>
+                                  <Wallet size={20} className="payment-method-icon" />
                                 </div>
-                              </div>
+                                {paymentMethod === "razorpay" && (
+                                  <p className="cod-notice">A secure Razorpay window opens after you place the order. We never see your card details.</p>
+                                )}
+                              </label>
                             )}
-                          </label>
 
-                          {/* Option 2: Digital Wallet */}
-                          <label
-                            className={`payment-method-card ${
-                              paymentData.method === "wallet" ? "is-selected" : ""
-                            }`}
-                          >
-                            <div className="payment-method-top">
-                              <input
-                                type="radio"
-                                name="method"
-                                value="wallet"
-                                checked={paymentData.method === "wallet"}
-                                onChange={handlePaymentChange}
-                                id="payment-method-wallet"
-                              />
-                              <div className="payment-method-info">
-                                <span className="payment-method-name">Digital Wallet / UPI</span>
-                                <span className="payment-method-desc">
-                                  Apple Pay, Google Pay, PhonePe, Paytm
-                                </span>
-                              </div>
-                              <Wallet size={20} className="payment-method-icon" />
-                            </div>
-
-                            {paymentData.method === "wallet" && (
-                              <div className="wallet-options-subrow">
-                                {["applepay", "googlepay", "phonepe", "paytm"].map((w) => (
-                                  <button
-                                    key={w}
-                                    type="button"
-                                    className={`wallet-sub-btn ${
-                                      paymentData.selectedWallet === w ? "active" : ""
-                                    }`}
-                                    onClick={() =>
-                                      setPaymentData((prev) => ({ ...prev, selectedWallet: w }))
-                                    }
-                                  >
-                                    {w === "applepay" && " Apple Pay"}
-                                    {w === "googlepay" && "Google Pay"}
-                                    {w === "phonepe" && "PhonePe / UPI"}
-                                    {w === "paytm" && "Paytm Wallet"}
-                                  </button>
-                                ))}
-                              </div>
+                            {payments.codEnabled && (
+                              <label className={`payment-method-card ${paymentMethod === "cod" ? "is-selected" : ""}`}>
+                                <div className="payment-method-top">
+                                  <input type="radio" name="method" value="cod" checked={paymentMethod === "cod"} onChange={() => setPaymentMethod("cod")} />
+                                  <div className="payment-method-info">
+                                    <span className="payment-method-name">Cash on Delivery</span>
+                                    <span className="payment-method-desc">Pay when your parcel arrives</span>
+                                  </div>
+                                  <Banknote size={20} className="payment-method-icon" />
+                                </div>
+                              </label>
                             )}
-                          </label>
-
-                          {/* Option 3: Cash on Delivery */}
-                          <label
-                            className={`payment-method-card ${
-                              paymentData.method === "cod" ? "is-selected" : ""
-                            }`}
-                          >
-                            <div className="payment-method-top">
-                              <input
-                                type="radio"
-                                name="method"
-                                value="cod"
-                                checked={paymentData.method === "cod"}
-                                onChange={handlePaymentChange}
-                                id="payment-method-cod"
-                              />
-                              <div className="payment-method-info">
-                                <span className="payment-method-name">Cash on Delivery (COD)</span>
-                                <span className="payment-method-desc">
-                                  Pay via Cash or QR code when your parcel arrives
-                                </span>
-                              </div>
-                              <Banknote size={20} className="payment-method-icon" />
-                            </div>
-
-                            {paymentData.method === "cod" && (
-                              <p className="cod-notice">
-                                ✓ Cash on delivery is available for your PIN code. Keep exact change or
-                                scan courier QR code upon arrival.
-                              </p>
-                            )}
-                          </label>
-
-                          {/* Option 4: Online Bank Payment (Net Banking) */}
-                          <label
-                            className={`payment-method-card ${
-                              paymentData.method === "netbanking" ? "is-selected" : ""
-                            }`}
-                          >
-                            <div className="payment-method-top">
-                              <input
-                                type="radio"
-                                name="method"
-                                value="netbanking"
-                                checked={paymentData.method === "netbanking"}
-                                onChange={handlePaymentChange}
-                                id="payment-method-netbanking"
-                              />
-                              <div className="payment-method-info">
-                                <span className="payment-method-name">Online Bank Payment</span>
-                                <span className="payment-method-desc">
-                                  Direct net banking transfer via all major Indian &amp; Global banks
-                                </span>
-                              </div>
-                              <Landmark size={20} className="payment-method-icon" />
-                            </div>
-
-                            {paymentData.method === "netbanking" && (
-                              <div className="bank-select-wrap">
-                                <label htmlFor="selectedBank">Choose Your Bank</label>
-                                <select
-                                  id="selectedBank"
-                                  name="selectedBank"
-                                  value={paymentData.selectedBank}
-                                  onChange={handlePaymentChange}
-                                >
-                                  <option value="hdfc">HDFC Bank</option>
-                                  <option value="icici">ICICI Bank</option>
-                                  <option value="sbi">State Bank of India (SBI)</option>
-                                  <option value="axis">Axis Bank</option>
-                                  <option value="kotak">Kotak Mahindra Bank</option>
-                                  <option value="other">Other National &amp; Global Banks</option>
-                                </select>
-                              </div>
-                            )}
-                          </label>
-                        </div>
-
-                        {/* Secure Payment Icons Row */}
-                        <div className="checkout-security-badges-card">
-                          <div className="security-badges-header">
-                            <ShieldCheck size={18} className="shield-icon" />
-                            <strong>100% Secure &amp; Protected Payment</strong>
                           </div>
-                          <div className="security-badges-list">
-                            <span className="security-badge-item">256-Bit SSL Encryption</span>
-                            <span className="security-badge-item">PCI-DSS Compliant</span>
-                            <span className="security-badge-item">Verified by Visa</span>
-                            <span className="security-badge-item">Mastercard Identity Check</span>
-                          </div>
-                        </div>
+                        )}
 
-                        {/* Step 2 Actions */}
+                        {errors.payment && (
+                          <span className="field-error-msg" role="alert">
+                            <AlertCircle size={13} /> {errors.payment}
+                          </span>
+                        )}
+
                         <div className="checkout-step-footer">
-                          <button
-                            type="button"
-                            className="checkout-back-link"
-                            onClick={() => setStep(1)}
-                          >
+                          <button type="button" className="checkout-back-link" onClick={() => goTo(1)}>
                             <ArrowLeft size={16} /> Back to Shipping
                           </button>
-
-                          <button
-                            type="submit"
-                            className="button button-dark checkout-continue-btn"
-                            id="continue-to-review-btn"
-                          >
+                          <button type="submit" className="button button-dark checkout-continue-btn" disabled={paymentOptions.length === 0}>
                             <span>Continue to Order Review</span>
                             <ChevronRight size={16} />
                           </button>
@@ -958,30 +579,18 @@ export default function Checkout() {
                     </div>
                   )}
 
-                  {/* ==================================================== */}
-                  {/* STEP 3: ORDER REVIEW & PLACE ORDER                   */}
-                  {/* ==================================================== */}
                   {step === 3 && (
                     <div className="checkout-step-content" id="step-review-section">
                       <div className="checkout-step-heading">
                         <h2>3. Order Review</h2>
-                        <p className="checkout-step-sub">
-                          Please review your order details, shipping address, and payment method
-                          before placing your order.
-                        </p>
+                        <p className="checkout-step-sub">Please review your order before placing it.</p>
                       </div>
 
-                      {/* Recaps Container */}
                       <div className="checkout-recaps-grid">
-                        {/* Shipping Recap */}
                         <div className="checkout-recap-box">
                           <div className="recap-header">
                             <span className="recap-title">Shipping Address</span>
-                            <button
-                              type="button"
-                              className="recap-edit-btn"
-                              onClick={() => setStep(1)}
-                            >
+                            <button type="button" className="recap-edit-btn" onClick={() => goTo(1)}>
                               Edit
                             </button>
                           </div>
@@ -998,127 +607,66 @@ export default function Checkout() {
                           </div>
                         </div>
 
-                        {/* Payment Recap */}
                         <div className="checkout-recap-box">
                           <div className="recap-header">
                             <span className="recap-title">Payment Method</span>
-                            <button
-                              type="button"
-                              className="recap-edit-btn"
-                              onClick={() => setStep(2)}
-                            >
+                            <button type="button" className="recap-edit-btn" onClick={() => goTo(2)}>
                               Edit
                             </button>
                           </div>
                           <div className="recap-body">
-                            {paymentData.method === "card" && (
-                              <>
-                                <strong>Credit / Debit Card</strong>
-                                <p>Card ending in {paymentData.cardNumber.slice(-4)}</p>
-                                <span className="recap-sub">Expires {paymentData.cardExpiry}</span>
-                              </>
-                            )}
-                            {paymentData.method === "wallet" && (
-                              <>
-                                <strong>Digital Wallet</strong>
-                                <p>Authorized via {paymentData.selectedWallet.toUpperCase()}</p>
-                                <span className="recap-sub">Instant One-Touch Payment</span>
-                              </>
-                            )}
-                            {paymentData.method === "cod" && (
+                            {paymentMethod === "cod" ? (
                               <>
                                 <strong>Cash on Delivery</strong>
-                                <p>Pay upon delivery at your doorstep</p>
-                                <span className="recap-sub">Eligible for cash or UPI scan</span>
+                                <p>Pay when your parcel arrives</p>
                               </>
-                            )}
-                            {paymentData.method === "netbanking" && (
+                            ) : (
                               <>
-                                <strong>Online Bank Payment</strong>
-                                <p>Bank: {paymentData.selectedBank.toUpperCase()}</p>
-                                <span className="recap-sub">Encrypted Bank Portal Gateway</span>
+                                <strong>Pay Online</strong>
+                                <p>Razorpay secure checkout</p>
                               </>
                             )}
                           </div>
                         </div>
                       </div>
 
-                      {/* Delivery Speed Options */}
                       <div className="checkout-delivery-speed-box">
                         <h4>Select Delivery Speed</h4>
                         <div className="delivery-speed-options">
-                          <label
-                            className={`delivery-speed-label ${
-                              reviewData.deliveryOption === "standard" ? "active" : ""
-                            }`}
-                          >
-                            <input
-                              type="radio"
-                              name="deliveryOption"
-                              value="standard"
-                              checked={reviewData.deliveryOption === "standard"}
-                              onChange={(e) =>
-                                setReviewData((prev) => ({
-                                  ...prev,
-                                  deliveryOption: e.target.value
-                                }))
-                              }
-                            />
+                          <label className={`delivery-speed-label ${deliveryOption === "standard" ? "active" : ""}`}>
+                            <input type="radio" name="deliveryOption" value="standard" checked={deliveryOption === "standard"} onChange={() => setDeliveryOption("standard")} />
                             <div>
-                              <strong>Standard Delivery (3–5 Business Days)</strong>
-                              <span>Complimentary tracked shipping with SMS notifications</span>
+                              <strong>Standard Delivery ({commerce.standardDelivery})</strong>
+                              <span>Tracked shipping</span>
                             </div>
-                            <span className="speed-price">FREE</span>
+                            <span className="speed-price">{shipping === 0 ? "FREE" : formatPrice(shipping)}</span>
                           </label>
-
-                          <label
-                            className={`delivery-speed-label ${
-                              reviewData.deliveryOption === "express" ? "active" : ""
-                            }`}
-                          >
-                            <input
-                              type="radio"
-                              name="deliveryOption"
-                              value="express"
-                              checked={reviewData.deliveryOption === "express"}
-                              onChange={(e) =>
-                                setReviewData((prev) => ({
-                                  ...prev,
-                                  deliveryOption: e.target.value
-                                }))
-                              }
-                            />
+                          <label className={`delivery-speed-label ${deliveryOption === "express" ? "active" : ""}`}>
+                            <input type="radio" name="deliveryOption" value="express" checked={deliveryOption === "express"} onChange={() => setDeliveryOption("express")} />
                             <div>
-                              <strong>Priority Express (1–2 Business Days)</strong>
-                              <span>Guaranteed fast track dispatch with priority packing</span>
+                              <strong>Express Delivery ({commerce.expressDelivery})</strong>
+                              <span>Priority dispatch</span>
                             </div>
-                            <span className="speed-price">{formatPrice(199)}</span>
+                            <span className="speed-price">+{formatPrice(commerce.expressShippingFee)}</span>
                           </label>
                         </div>
                       </div>
 
-                      {/* Order Items Table in Review */}
                       <div className="checkout-review-items-table">
                         <h4>Items in Your Order ({cart.length})</h4>
                         <div className="review-items-list">
                           {cart.map((item) => (
                             <div key={item.id} className="review-item-row">
-                              <img
-                                src={item.product?.image || item.product?.gallery?.[0]}
-                                alt={item.product?.name}
-                              />
+                              <img src={item.product.image} alt={item.product.name} />
                               <div className="review-item-details">
-                                <h5>{item.product?.name}</h5>
+                                <h5>{item.product.name}</h5>
                                 <span>
-                                  Color: {item.selectedColor || "Gold"} • Qty: {item.quantity}
+                                  {item.selectedColor}
+                                  {item.selectedSize ? ` • ${item.selectedSize}` : ""} • Qty: {item.quantity}
                                 </span>
                               </div>
                               <div className="review-item-price">
-                                <strong>
-                                  {formatPrice(
-                                    (item.product?.price || 0) * item.quantity
-                                  )}
-                                </strong>
+                                <strong>{formatPrice(item.product.price * item.quantity)}</strong>
                               </div>
                             </div>
                           ))}
@@ -1126,35 +674,29 @@ export default function Checkout() {
                       </div>
 
                       <form onSubmit={handlePlaceOrder} className="checkout-place-order-form">
-                        {/* Terms and Privacy Checkbox */}
+                        <div className="checkout-field-wrap full-width">
+                          <label htmlFor="orderNotes">Order notes (optional)</label>
+                          <textarea id="orderNotes" rows={2} maxLength={500} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Gift message or delivery instructions" />
+                        </div>
+
                         <div className="checkout-terms-card">
                           <label className="checkout-terms-label">
                             <input
                               type="checkbox"
-                              checked={reviewData.agreedToTerms}
+                              checked={agreedToTerms}
                               onChange={(e) => {
-                                setReviewData((prev) => ({
-                                  ...prev,
-                                  agreedToTerms: e.target.checked
-                                }));
-                                if (errors.terms) {
-                                  setErrors((prev) => {
-                                    const next = { ...prev };
-                                    delete next.terms;
-                                    return next;
-                                  });
-                                }
+                                setAgreedToTerms(e.target.checked);
+                                setErrors((prev) => ({ ...prev, terms: undefined }));
                               }}
                               id="terms-privacy-checkbox"
-                              required
                             />
                             <span>
                               I agree to the{" "}
-                              <Link to="/shipping-returns" target="_blank">
+                              <Link to="/terms" target="_blank">
                                 Terms of Service
                               </Link>{" "}
                               and{" "}
-                              <Link to="/shipping-returns" target="_blank">
+                              <Link to="/privacy" target="_blank">
                                 Privacy Policy
                               </Link>
                               . <span className="required-star">*</span>
@@ -1167,26 +709,17 @@ export default function Checkout() {
                           )}
                         </div>
 
-                        {/* Place Order CTA Button */}
+                        {submitError && <p className="inline-alert inline-alert-error">{submitError}</p>}
+
                         <div className="checkout-final-action-row">
-                          <button
-                            type="button"
-                            className="checkout-back-link"
-                            onClick={() => setStep(2)}
-                          >
+                          <button type="button" className="checkout-back-link" onClick={() => goTo(2)}>
                             <ArrowLeft size={16} /> Back to Payment
                           </button>
-
-                          <button
-                            type="submit"
-                            className="button button-gold checkout-place-order-btn"
-                            disabled={isSubmitting}
-                            id="place-order-button"
-                          >
+                          <button type="submit" className="button button-gold checkout-place-order-btn" disabled={isSubmitting} id="place-order-button">
                             {isSubmitting ? (
                               <>
                                 <Loader2 size={18} className="checkout-spinner" />
-                                <span>Securing Your Order...</span>
+                                <span>Placing Your Order...</span>
                               </>
                             ) : (
                               <>
@@ -1201,9 +734,6 @@ export default function Checkout() {
                   )}
                 </div>
 
-                {/* ==================================================== */}
-                {/* DESKTOP ORDER SUMMARY SIDEBAR                        */}
-                {/* ==================================================== */}
                 <aside className="checkout-sidebar-column">
                   <div className="checkout-order-summary-card">
                     <div className="summary-header">
@@ -1213,65 +743,25 @@ export default function Checkout() {
                       </span>
                     </div>
 
-                    {/* Cart Items List */}
                     <div className="checkout-sidebar-items">
                       {cart.map((item) => (
                         <div key={item.id} className="checkout-sidebar-item">
                           <div className="item-thumb-wrap">
-                            <img
-                              src={item.product?.image || item.product?.gallery?.[0]}
-                              alt={item.product?.name}
-                            />
+                            <img src={item.product.image} alt={item.product.name} />
                             <span className="item-qty-badge">{item.quantity}</span>
                           </div>
                           <div className="item-info">
-                            <h4 className="item-name">{item.product?.name}</h4>
-                            <span className="item-variant">
-                              Color: {item.selectedColor || "Gold"}
-                            </span>
+                            <h4 className="item-name">{item.product.name}</h4>
+                            <span className="item-variant">{item.selectedColor}</span>
                           </div>
-                          <strong className="item-price">
-                            {formatPrice((item.product?.price || 0) * item.quantity)}
-                          </strong>
+                          <strong className="item-price">{formatPrice(item.product.price * item.quantity)}</strong>
                         </div>
                       ))}
                     </div>
 
-                    {/* Price Breakdown */}
                     <div className="summary-breakdown">
-                      <div className="summary-line">
-                        <span>Subtotal</span>
-                        <strong>{formatPrice(cartSubtotal)}</strong>
-                      </div>
-
-                      {appliedPromo && discountAmount > 0 && (
-                        <div className="summary-line discount">
-                          <span>Promo ({appliedPromo.code})</span>
-                          <span>-{formatPrice(discountAmount)}</span>
-                        </div>
-                      )}
-
-                      <div className="summary-line">
-                        <span>Shipping Fee</span>
-                        <strong>
-                          {shipping === 0 ? "FREE" : formatPrice(shipping)}
-                        </strong>
-                      </div>
-
-                      {deliverySurcharge > 0 && (
-                        <div className="summary-line">
-                          <span>Priority Dispatch</span>
-                          <strong>{formatPrice(deliverySurcharge)}</strong>
-                        </div>
-                      )}
-
-                      <div className="summary-line">
-                        <span>Estimated Tax (3% GST)</span>
-                        <strong>{formatPrice(estimatedTax)}</strong>
-                      </div>
-
+                      {summaryLines}
                       <div className="summary-divider" />
-
                       <div className="summary-total-line">
                         <span>Total Due</span>
                         <strong className="summary-grand-total" id="checkout-sidebar-grand-total">
@@ -1280,14 +770,9 @@ export default function Checkout() {
                       </div>
                     </div>
 
-                    {/* Security Badge in Sidebar */}
                     <div className="checkout-sidebar-security">
-                      <Lock size={15} />
-                      <span>256-Bit SSL Encrypted Checkout</span>
-                    </div>
-
-                    <div className="checkout-guarantee-note">
-                      ✦ Complimentary unboxing gift box &amp; 7-day doorstep exchange.
+                      <ShieldCheck size={15} />
+                      <span>Final prices are confirmed by our server</span>
                     </div>
                   </div>
                 </aside>

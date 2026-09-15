@@ -1,9 +1,10 @@
-import { Controller, Post, Get, Body, UseGuards, Inject } from '@nestjs/common';
+import { Controller, Post, Get, Body, UseGuards, Inject, HttpCode } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { AuthService } from './auth.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
+import { ResetPasswordDto } from './dto/reset-password.dto.js';
 import { JwtAuthGuard } from './guards/jwt-auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import type { UserDocument } from '../users/schemas/user.schema.js';
@@ -22,9 +23,11 @@ export class AuthController {
   }
 
   @Post('login')
+  @HttpCode(200)
   @ApiOperation({ summary: 'Sign in with email and password' })
   @ApiResponse({ status: 200, description: 'Authenticated successfully with JWT token.' })
   @ApiResponse({ status: 401, description: 'Invalid credentials.' })
+  @ApiResponse({ status: 403, description: 'Account deactivated.' })
   async login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
   }
@@ -32,26 +35,23 @@ export class AuthController {
   @Get('me')
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
-  @ApiOperation({ summary: 'Get profile of current authenticated customer' })
-  @ApiResponse({ status: 200, description: 'Current user profile.' })
+  @ApiOperation({ summary: 'Get profile of the current authenticated user' })
   @ApiResponse({ status: 401, description: 'Unauthorized / expired token.' })
   async me(@CurrentUser() user: UserDocument) {
-    return {
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        phone: user.phone,
-        addresses: user.addresses,
-      },
-    };
+    return { user: this.authService.sanitizeUser(user) };
   }
 
   @Post('forgot-password')
-  @ApiOperation({ summary: 'Request password reset instructions' })
-  @ApiResponse({ status: 200, description: 'Reset instructions acknowledged.' })
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Request a password reset link' })
   async forgotPassword(@Body() dto: ForgotPasswordDto) {
     return this.authService.forgotPassword(dto);
+  }
+
+  @Post('reset-password')
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Set a new password using a reset token' })
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    return this.authService.resetPassword(dto);
   }
 }

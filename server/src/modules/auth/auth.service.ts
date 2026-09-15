@@ -2,27 +2,45 @@ import {
   Injectable,
   ConflictException,
   UnauthorizedException,
-  NotFoundException,
+  ForbiddenException,
+  BadRequestException,
   Inject,
+  Logger,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
 import * as bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { UsersService } from '../users/users.service.js';
 import { RegisterDto } from './dto/register.dto.js';
 import { LoginDto } from './dto/login.dto.js';
 import { ForgotPasswordDto } from './dto/forgot-password.dto.js';
-import { UserDocument } from '../users/schemas/user.schema.js';
+import { ResetPasswordDto } from './dto/reset-password.dto.js';
+import { User, UserDocument } from '../users/schemas/user.schema.js';
+
+const RESET_TOKEN_TTL_MS = 60 * 60 * 1000;
+
+const hashToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex');
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     @Inject(UsersService) private readonly usersService: UsersService,
     @Inject(JwtService) private readonly jwtService: JwtService,
+    @Inject(ConfigService) private readonly configService: ConfigService,
+    @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
   ) {}
 
-  private sanitizeUser(user: UserDocument) {
+  sanitizeUser(user: UserDocument) {
     const obj = user.toObject ? user.toObject() : (user as any);
     delete obj.password;
+    delete obj.resetPasswordTokenHash;
+    delete obj.resetPasswordExpires;
+    obj.id = obj._id;
     return obj;
   }
 
@@ -32,8 +50,7 @@ export class AuthService {
       throw new ConflictException('An account with this email address already exists.');
     }
 
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(dto.password, salt);
+    const hashedPassword = await bcrypt.hash(dto.password, 10);
 
     const user = await this.usersService.create({
       name: dto.name.trim(),
@@ -41,45 +58,78 @@ export class AuthService {
       password: hashedPassword,
       role: 'customer',
       addresses: [],
+      lastLoginAt: new Date(),
     });
 
-    const token = this.generateToken(user);
-
     return {
-      message: 'Your Lustre & Co. account is ready.',
+      message: 'Your account is ready.',
       user: this.sanitizeUser(user),
-      token,
+      token: this.generateToken(user),
     };
   }
 
   async login(dto: LoginDto) {
     const user = await this.usersService.findByEmail(dto.email);
-    if (!user) {
+    const isMatch = user ? await bcrypt.compare(dto.password, user.password) : false;
+    if (!user || !isMatch) {
       throw new UnauthorizedException('Invalid email or password.');
     }
 
-    const isMatch = await bcrypt.compare(dto.password, user.password);
-    if (!isMatch) {
-      throw new UnauthorizedException('Invalid email or password.');
+    if (user.isActive === false) {
+      throw new ForbiddenException('This account has been deactivated. Please contact support.');
     }
 
-    const token = this.generateToken(user);
+    user.lastLoginAt = new Date();
+    await user.save();
 
     return {
-      message: 'Welcome back to Lustre & Co.',
+      message: 'Welcome back.',
       user: this.sanitizeUser(user),
-      token,
+      token: this.generateToken(user),
     };
   }
 
   async forgotPassword(dto: ForgotPasswordDto) {
     const user = await this.usersService.findByEmail(dto.email);
-    // Return friendly message regardless to prevent email enumeration
+
+    if (user && user.isActive !== false) {
+      const token = crypto.randomBytes(32).toString('hex');
+      user.resetPasswordTokenHash = hashToken(token);
+      user.resetPasswordExpires = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+      await user.save();
+
+      const frontendUrl = (this.configService.get<string>('FRONTEND_URL') || 'http://localhost:5177')
+        .split(',')[0]
+        .trim();
+      const resetUrl = `${frontendUrl}/account/reset-password?token=${token}`;
+
+      // No email transport is configured yet; the link is written to the server log instead.
+      this.logger.log(`Password reset requested for ${user.email}. Reset link (valid 1 hour): ${resetUrl}`);
+    }
+
+    // Same response either way to prevent account enumeration.
     return {
       success: true,
-      message:
-        'If an account exists with this email address, a password reset link has been dispatched.',
+      message: 'If an account exists with this email address, a password reset link has been sent.',
     };
+  }
+
+  async resetPassword(dto: ResetPasswordDto) {
+    const user = await this.userModel.findOne({
+      resetPasswordTokenHash: hashToken(dto.token.trim()),
+      resetPasswordExpires: { $gt: new Date() },
+    });
+
+    if (!user) {
+      throw new BadRequestException('This reset link is invalid or has expired. Please request a new one.');
+    }
+
+    user.password = await bcrypt.hash(dto.password, 10);
+    user.resetPasswordTokenHash = undefined;
+    user.resetPasswordExpires = undefined;
+    await user.save();
+
+    return { success: true, message: 'Your password has been reset. You can now sign in.' };
   }
 
   private generateToken(user: UserDocument): string {

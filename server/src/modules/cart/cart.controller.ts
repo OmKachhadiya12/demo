@@ -2,16 +2,19 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Delete,
   Body,
   Param,
   UseGuards,
   Inject,
+  HttpCode,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { CartService } from './cart.service.js';
 import { AddCartItemDto } from './dto/add-cart-item.dto.js';
 import { SyncCartDto } from './dto/sync-cart.dto.js';
+import { UpdateCartItemDto } from './dto/update-cart-item.dto.js';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
 import type { UserDocument } from '../users/schemas/user.schema.js';
@@ -25,44 +28,43 @@ export class CartController {
 
   @Get()
   @ApiOperation({ summary: "Get current user's shopping bag" })
-  @ApiResponse({ status: 200, description: 'Cart retrieved successfully.' })
   async getCart(@CurrentUser() user: UserDocument) {
     return this.cartService.getCart(user._id);
   }
 
   @Post('sync')
-  @ApiOperation({ summary: 'Merge guest localStorage items into user server cart upon login' })
-  @ApiResponse({ status: 200, description: 'Cart synchronized successfully.' })
-  async syncCart(
-    @CurrentUser() user: UserDocument,
-    @Body() dto: SyncCartDto,
-  ) {
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Merge guest localStorage items into the account bag upon login' })
+  async syncCart(@CurrentUser() user: UserDocument, @Body() dto: SyncCartDto) {
     return this.cartService.syncCart(user._id, dto);
   }
 
   @Post('items')
-  @ApiOperation({ summary: 'Add or update item in shopping bag' })
-  @ApiResponse({ status: 200, description: 'Cart item added/updated successfully.' })
-  async addItem(
-    @CurrentUser() user: UserDocument,
-    @Body() dto: AddCartItemDto,
-  ) {
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Add an item (or more of an existing item) to the bag' })
+  @ApiResponse({ status: 400, description: 'Not enough stock.' })
+  async addItem(@CurrentUser() user: UserDocument, @Body() dto: AddCartItemDto) {
     return this.cartService.addItem(user._id, dto);
   }
 
-  @Delete('items/:id')
-  @ApiOperation({ summary: 'Remove an item from shopping bag' })
-  @ApiResponse({ status: 200, description: 'Cart item removed successfully.' })
-  async removeItem(
+  @Patch('items/:id')
+  @ApiOperation({ summary: 'Set the quantity of a bag item' })
+  async updateItem(
     @CurrentUser() user: UserDocument,
     @Param('id') itemId: string,
+    @Body() dto: UpdateCartItemDto,
   ) {
+    return this.cartService.updateItemQuantity(user._id, itemId, dto.quantity);
+  }
+
+  @Delete('items/:id')
+  @ApiOperation({ summary: 'Remove an item from the bag' })
+  async removeItem(@CurrentUser() user: UserDocument, @Param('id') itemId: string) {
     return this.cartService.removeItem(user._id, itemId);
   }
 
   @Delete()
-  @ApiOperation({ summary: 'Empty shopping bag' })
-  @ApiResponse({ status: 200, description: 'Cart cleared successfully.' })
+  @ApiOperation({ summary: 'Empty the bag' })
   async clearCart(@CurrentUser() user: UserDocument) {
     return this.cartService.clearCart(user._id);
   }

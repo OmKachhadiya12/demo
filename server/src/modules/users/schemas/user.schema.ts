@@ -32,6 +32,16 @@ export class User {
     default: [],
   })
   wishlist: Types.ObjectId[];
+
+  /** Deactivated accounts cannot sign in or use existing tokens. */
+  @Prop({ type: Boolean, default: true }) isActive: boolean;
+  @Prop({ type: Date }) lastLoginAt?: Date;
+
+  /** SHA-256 hash of the single-use reset token; the raw token is never stored. */
+  @Prop({ type: String }) resetPasswordTokenHash?: string;
+  @Prop({ type: Date }) resetPasswordExpires?: Date;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);
+
+export const PRIVATE_USER_FIELDS = '-password -resetPasswordTokenHash -resetPasswordExpires';

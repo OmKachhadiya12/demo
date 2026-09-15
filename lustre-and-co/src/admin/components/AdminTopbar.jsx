@@ -1,32 +1,62 @@
-import {
-  Bell,
-  Menu,
-  Search,
-  ExternalLink,
-  ChevronDown
-} from "lucide-react";
-import { Link } from "react-router-dom";
+import { Bell, Menu, Search, ExternalLink, LogOut } from "lucide-react";
+import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
+import { useStore } from "../../context/StoreContext";
+import { initials } from "../utils";
 
-export default function AdminTopbar({ onMenuClick }) {
+export default function AdminTopbar({ onMenuClick, attention }) {
+  const navigate = useNavigate();
+  const { user, logout } = useStore();
   const [search, setSearch] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+
+  const notifications = [
+    attention.openOrders > 0 && {
+      to: "/admin/orders?status=Confirmed",
+      tone: "notification-rose",
+      text: `${attention.openOrders} order${attention.openOrders === 1 ? "" : "s"} waiting to be fulfilled`
+    },
+    attention.lowStock > 0 && {
+      to: "/admin/products?stock=low",
+      tone: "notification-gold",
+      text: `${attention.lowStock} product${attention.lowStock === 1 ? " is" : "s are"} low on stock`
+    },
+    attention.pendingReviews > 0 && {
+      to: "/admin/reviews",
+      tone: "notification-green",
+      text: `${attention.pendingReviews} review${attention.pendingReviews === 1 ? "" : "s"} awaiting moderation`
+    },
+    attention.newMessages > 0 && {
+      to: "/admin/messages",
+      tone: "notification-rose",
+      text: `${attention.newMessages} new customer message${attention.newMessages === 1 ? "" : "s"}`
+    }
+  ].filter(Boolean);
+
+  function submitSearch(event) {
+    event.preventDefault();
+    if (!search.trim()) return;
+    navigate(`/admin/orders?search=${encodeURIComponent(search.trim())}`);
+    setSearch("");
+  }
 
   return (
     <header className="admin-topbar">
       <div className="admin-topbar-left">
-        <button className="admin-menu-toggle" onClick={onMenuClick}>
+        <button className="admin-menu-toggle" onClick={onMenuClick} aria-label="Open menu">
           <Menu size={20} />
         </button>
 
         <div className="admin-search">
           <Search size={17} />
-          <input
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search products, orders, customers..."
-          />
-          <kbd>⌘ K</kbd>
+          <form onSubmit={submitSearch}>
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search orders by ID, name, email, phone…"
+              aria-label="Search orders"
+            />
+          </form>
         </div>
       </div>
 
@@ -39,45 +69,52 @@ export default function AdminTopbar({ onMenuClick }) {
         <div className="admin-notification-wrap">
           <button
             className="admin-topbar-icon"
-            onClick={() => setNotificationsOpen((open) => !open)}
+            onClick={() => setNotificationsOpen((isOpen) => !isOpen)}
             aria-label="Notifications"
+            aria-expanded={notificationsOpen}
           >
             <Bell size={18} />
-            <span className="admin-notification-dot" />
+            {notifications.length > 0 && <span className="admin-notification-dot" />}
           </button>
 
           {notificationsOpen && (
             <div className="admin-notification-panel">
               <div>
-                <strong>Notifications</strong>
-                <span>3 new updates</span>
+                <strong>Needs attention</strong>
+                <span>{notifications.length ? `${notifications.length} item(s)` : "All caught up"}</span>
               </div>
 
-              <a href="#low-stock">
-                <span className="notification-dot notification-gold" />
-                2 products are low in stock
-              </a>
+              {notifications.length === 0 && <p className="admin-muted">Nothing needs your attention right now.</p>}
 
-              <a href="#order">
-                <span className="notification-dot notification-rose" />
-                New order received
-              </a>
-
-              <a href="#review">
-                <span className="notification-dot notification-green" />
-                New customer review
-              </a>
+              {notifications.map((item) => (
+                <Link key={item.to} to={item.to} onClick={() => setNotificationsOpen(false)}>
+                  <span className={`notification-dot ${item.tone}`} />
+                  {item.text}
+                </Link>
+              ))}
             </div>
           )}
         </div>
 
-        <button className="admin-profile">
-          <span className="admin-avatar">TC</span>
+        <Link to="/admin/settings" className="admin-profile">
+          <span className="admin-avatar">{initials(user?.name)}</span>
           <span className="admin-profile-copy">
-            <strong>Tanvi Chopra</strong>
+            <strong>{user?.name}</strong>
             <small>Admin</small>
           </span>
-          <ChevronDown size={15} />
+        </Link>
+
+        <button
+          type="button"
+          className="admin-topbar-logout"
+          onClick={() => {
+            logout();
+            navigate("/account/login");
+          }}
+          aria-label="Sign out"
+          title="Sign out"
+        >
+          <LogOut size={16} />
         </button>
       </div>
     </header>

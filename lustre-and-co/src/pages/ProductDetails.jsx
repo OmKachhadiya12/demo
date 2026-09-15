@@ -1,4 +1,4 @@
-import { useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Heart,
   Minus,
@@ -15,52 +15,66 @@ import {
   Check,
   ShoppingBag,
   Sparkles,
-  Calendar,
   MapPin,
-  Award,
-  PackageCheck
+  Award
 } from "lucide-react";
-import { Link, useNavigate, useParams } from "react-router-dom";
-import { getProductBySlug, formatPrice, products } from "../data/products";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
+import { COLOR_SWATCHES, formatPrice, isInStock, normalizeProduct } from "../data/products";
 import { useStore } from "../context/StoreContext";
+import { useSettings } from "../context/SettingsContext";
 import ProductCard from "../components/ProductCard";
+import api, { getErrorMessage } from "../services/api";
+
+function parseDayRange(text, fallback) {
+  const numbers = String(text || "").match(/\d+/g);
+  if (!numbers) return fallback;
+  return [Number(numbers[0]), Number(numbers[1] || numbers[0])];
+}
+
+function Accordion({ id, title, open, onToggle, children }) {
+  return (
+    <div className="pdp-accordion-item" id={id}>
+      <button
+        type="button"
+        className={`pdp-accordion-header ${open ? "is-open" : ""}`}
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span className="pdp-accordion-title">{title}</span>
+        <ChevronDown size={18} className={`pdp-accordion-chevron ${open ? "rotate" : ""}`} />
+      </button>
+      {open && <div className="pdp-accordion-content">{children}</div>}
+    </div>
+  );
+}
 
 export default function ProductDetails() {
   const { slug } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const { addToCart, toggleWishlist, isWishlisted, showToast, user } = useStore();
+  const { settings } = useSettings();
+  const { commerce } = settings;
 
-  // Find product or fallback to the flagship Aurora necklace
-  const product =
-    getProductBySlug(slug) ||
-    getProductBySlug("aurora-gold-plated-necklace") ||
-    products[0];
+  const [product, setProduct] = useState(null);
+  const [status, setStatus] = useState("loading");
+  const [related, setRelated] = useState([]);
+  const [reviewData, setReviewData] = useState({ reviews: [], distribution: [] });
 
-  const {
-    addToCart,
-    toggleWishlist,
-    isWishlisted,
-    showToast
-  } = useStore();
-
-  // Gallery state
   const [activeImage, setActiveImage] = useState(0);
   const [isZoomed, setIsZoomed] = useState(false);
   const [zoomPos, setZoomPos] = useState({ x: 50, y: 50 });
   const galleryRef = useRef(null);
 
-  // Buy box state
-  const [selectedColor, setSelectedColor] = useState(
-    product?.color || product?.availableColors?.[0] || "Gold"
-  );
+  const [selectedColor, setSelectedColor] = useState("");
+  const [selectedSize, setSelectedSize] = useState("");
   const [quantity, setQuantity] = useState(1);
   const [isAdding, setIsAdding] = useState(false);
   const [isAdded, setIsAdded] = useState(false);
 
-  // Delivery checker state
   const [pinCode, setPinCode] = useState("");
-  const [pinStatus, setPinStatus] = useState(null); // { success: boolean, message: string }
+  const [pinStatus, setPinStatus] = useState(null);
 
-  // Accordion state
   const [openAccordions, setOpenAccordions] = useState({
     details: true,
     material: false,
@@ -69,42 +83,86 @@ export default function ProductDetails() {
     reviews: false
   });
 
-  // Reviews state
-  const [reviewsList, setReviewsList] = useState(product?.customerReviews || []);
   const [showReviewForm, setShowReviewForm] = useState(false);
-  const [reviewRating, setReviewRating] = useState(5);
-  const [reviewerName, setReviewerName] = useState("");
-  const [reviewTitle, setReviewTitle] = useState("");
-  const [reviewComment, setReviewComment] = useState("");
-  const [reviewSubmitted, setReviewSubmitted] = useState(false);
+  const [reviewForm, setReviewForm] = useState({ rating: 5, title: "", comment: "" });
+  const [reviewMessage, setReviewMessage] = useState(null);
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
 
-  // "Complete the Look" Bundle state
-  const bundleItems = useMemo(() => {
-    const earring = products.find((p) => p.id === "p1") || products[1];
-    const bracelet = products.find((p) => p.id === "p4") || products[4];
-    const ring = products.find((p) => p.id === "p3") || products[3];
-    return [earring, bracelet, ring].filter(Boolean);
-  }, []);
-
-  const [selectedBundleIds, setSelectedBundleIds] = useState(() =>
-    bundleItems.map((item) => item.id)
-  );
+  const [selectedBundleIds, setSelectedBundleIds] = useState([]);
   const [isAddingBundle, setIsAddingBundle] = useState(false);
 
-  // "You May Also Like" Related Products
-  const relatedProducts = useMemo(() => {
-    return products
-      .filter((item) => item.id !== product?.id)
-      .slice(0, 4);
-  }, [product]);
+  async function loadReviews(productSlug) {
+    try {
+      const { data } = await api.get(`/products/${productSlug}/reviews`);
+      setReviewData(data);
+    } catch {
+      setReviewData({ reviews: [], distribution: [] });
+    }
+  }
 
-  if (!product) {
+  useEffect(() => {
+    let active = true;
+    setStatus("loading");
+    setActiveImage(0);
+    setQuantity(1);
+    setReviewMessage(null);
+
+    (async () => {
+      try {
+        const { data } = await api.get(`/products/${slug}`);
+        if (!active) return;
+        const loaded = normalizeProduct(data);
+        setProduct(loaded);
+        setSelectedColor(loaded.availableColors?.[0] || "Gold");
+        setSelectedSize(loaded.availableSizes?.[0] || "");
+        setStatus("ready");
+
+        const [relatedRes] = await Promise.allSettled([api.get(`/products/${slug}/related`), loadReviews(slug)]);
+        if (!active) return;
+        if (relatedRes.status === "fulfilled") {
+          const items = relatedRes.value.data.map(normalizeProduct);
+          setRelated(items);
+          setSelectedBundleIds(items.slice(0, 3).map((item) => item.slug));
+        }
+      } catch (err) {
+        if (active) setStatus(err.response?.status === 404 ? "not-found" : "error");
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [slug]);
+
+  const deliveryRange = useMemo(() => {
+    const [start, end] = parseDayRange(commerce.standardDelivery, [3, 5]);
+    const opts = { month: "short", day: "numeric" };
+    const from = new Date(Date.now() + start * 86400000).toLocaleDateString("en-US", opts);
+    const to = new Date(Date.now() + end * 86400000).toLocaleDateString("en-US", opts);
+    return `${from} – ${to}`;
+  }, [commerce.standardDelivery]);
+
+  if (status === "loading") {
+    return (
+      <section className="section">
+        <div className="container">
+          <p className="catalog-loading">Loading piece…</p>
+        </div>
+      </section>
+    );
+  }
+
+  if (status !== "ready" || !product) {
     return (
       <section className="section">
         <div className="container empty-state">
           <span className="empty-icon">✦</span>
-          <h1>Piece not found</h1>
-          <p>The product you are looking for may have moved.</p>
+          <h1>{status === "not-found" ? "Piece not found" : "This piece could not be loaded"}</h1>
+          <p>
+            {status === "not-found"
+              ? "The product you are looking for is no longer available."
+              : "Please check your connection and try again."}
+          </p>
           <Link to="/shop" className="button button-dark">
             Return to shop
           </Link>
@@ -113,172 +171,119 @@ export default function ProductDetails() {
     );
   }
 
-  const wished = isWishlisted(product.id);
-  const gallery = product.gallery && product.gallery.length > 0 ? product.gallery : [product.image];
-
-  // Calculate discount percentage
+  const wished = isWishlisted(product.slug);
+  const gallery = product.gallery;
+  const inStock = isInStock(product);
+  const maxQuantity = Math.max(1, Math.min(10, product.stockQuantity));
   const discountPercent =
     product.oldPrice && product.oldPrice > product.price
       ? Math.round(((product.oldPrice - product.price) / product.oldPrice) * 100)
-      : 32;
-
-  // Estimated delivery calculation (3 to 5 days from today)
-  const deliveryStartDate = new Date();
-  deliveryStartDate.setDate(deliveryStartDate.getDate() + 3);
-  const deliveryEndDate = new Date();
-  deliveryEndDate.setDate(deliveryEndDate.getDate() + 5);
-  const options = { month: "short", day: "numeric" };
-  const formattedDeliveryRange = `${deliveryStartDate.toLocaleDateString(
-    "en-US",
-    options
-  )} – ${deliveryEndDate.toLocaleDateString("en-US", options)}`;
-
-  // Gallery Navigation Handlers
-  function prevImage() {
-    setActiveImage((curr) => (curr - 1 + gallery.length) % gallery.length);
-  }
-
-  function nextImage() {
-    setActiveImage((curr) => (curr + 1) % gallery.length);
-  }
+      : 0;
+  const bundleItems = related.slice(0, 3);
+  const totalReviews = reviewData.reviews.length;
 
   function handleMouseMove(e) {
     if (!galleryRef.current) return;
     const rect = galleryRef.current.getBoundingClientRect();
-    const x = Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100));
-    const y = Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100));
-    setZoomPos({ x, y });
-  }
-
-  // Add to Bag with realistic loading state
-  async function handleAddToCart() {
-    if (isAdding) return;
-    setIsAdding(true);
-    await new Promise((r) => setTimeout(r, 600));
-
-    addToCart(
-      {
-        ...product,
-        selectedColor
-      },
-      quantity
-    );
-
-    setIsAdding(false);
-    setIsAdded(true);
-    setTimeout(() => setIsAdded(false), 2200);
-  }
-
-  // Buy Now handler
-  function handleBuyNow() {
-    addToCart(
-      {
-        ...product,
-        selectedColor
-      },
-      quantity
-    );
-    navigate("/checkout");
-  }
-
-  // Pin Code delivery check handler
-  function handleCheckDelivery(e) {
-    e.preventDefault();
-    const trimmed = pinCode.trim();
-    if (!/^\d{5,6}$/.test(trimmed)) {
-      setPinStatus({
-        success: false,
-        message: "Please enter a valid 6-digit delivery PIN code."
-      });
-      return;
-    }
-
-    setPinStatus({
-      success: true,
-      message: `Delivery available to ${trimmed}! Estimated arrival by ${formattedDeliveryRange}. Free shipping & cash on delivery available.`
+    setZoomPos({
+      x: Math.max(0, Math.min(100, ((e.clientX - rect.left) / rect.width) * 100)),
+      y: Math.max(0, Math.min(100, ((e.clientY - rect.top) / rect.height) * 100))
     });
   }
 
-  // Accordion toggle helper
-  function toggleAccordion(key) {
-    setOpenAccordions((prev) => ({
-      ...prev,
-      [key]: !prev[key]
-    }));
+  async function handleAddToCart() {
+    if (isAdding || !inStock) return;
+    setIsAdding(true);
+    const added = await addToCart({ ...product, selectedColor, selectedSize }, quantity);
+    setIsAdding(false);
+    if (added) {
+      setIsAdded(true);
+      setTimeout(() => setIsAdded(false), 2200);
+    }
   }
 
-  // Review submission handler
-  function handleReviewSubmit(e) {
+  async function handleBuyNow() {
+    if (!inStock) return;
+    const added = await addToCart({ ...product, selectedColor, selectedSize }, quantity);
+    if (added) navigate("/checkout");
+  }
+
+  function handleCheckDelivery(e) {
     e.preventDefault();
-    if (!reviewerName.trim() || !reviewComment.trim()) return;
-
-    const newEntry = {
-      id: Date.now(),
-      author: reviewerName.trim(),
-      rating: reviewRating,
-      date: "Just now",
-      verified: true,
-      title: reviewTitle.trim() || "Stunning piece",
-      comment: reviewComment.trim()
-    };
-
-    setReviewsList([newEntry, ...reviewsList]);
-    setReviewSubmitted(true);
-    setReviewerName("");
-    setReviewTitle("");
-    setReviewComment("");
-    setTimeout(() => {
-      setShowReviewForm(false);
-      setReviewSubmitted(false);
-    }, 2000);
+    const trimmed = pinCode.trim();
+    if (!/^\d{6}$/.test(trimmed)) {
+      setPinStatus({ success: false, message: "Please enter a valid 6-digit PIN code." });
+      return;
+    }
+    setPinStatus({
+      success: true,
+      message: `Standard delivery to ${trimmed} usually takes ${commerce.standardDelivery} after dispatch (${commerce.dispatchTime}).${
+        settings.payments.codEnabled ? " Cash on delivery is available at checkout." : ""
+      }`
+    });
   }
 
-  // Complete the Look bundle toggle
-  function toggleBundleItem(id) {
+  function toggleAccordion(key) {
+    setOpenAccordions((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  async function handleReviewSubmit(e) {
+    e.preventDefault();
+    if (!reviewForm.comment.trim() || !reviewForm.title.trim()) return;
+    setIsSubmittingReview(true);
+    setReviewMessage(null);
+    try {
+      const { data } = await api.post(`/products/${product.slug}/reviews`, reviewForm);
+      setReviewMessage({ success: true, text: data.message });
+      setReviewForm({ rating: 5, title: "", comment: "" });
+      if (data.review?.status === "approved") loadReviews(product.slug);
+      setTimeout(() => setShowReviewForm(false), 2500);
+    } catch (err) {
+      setReviewMessage({ success: false, text: getErrorMessage(err, "Your review could not be submitted.") });
+    } finally {
+      setIsSubmittingReview(false);
+    }
+  }
+
+  function toggleBundleItem(itemSlug) {
     setSelectedBundleIds((prev) =>
-      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+      prev.includes(itemSlug) ? prev.filter((id) => id !== itemSlug) : [...prev, itemSlug]
     );
   }
 
-  // Bundle pricing calculation
-  const totalBundleOriginalPrice =
-    product.price +
-    bundleItems
-      .filter((item) => selectedBundleIds.includes(item.id))
-      .reduce((sum, item) => sum + item.price, 0);
-
-  const bundleDiscount = Math.round(totalBundleOriginalPrice * 0.15);
-  const finalBundlePrice = totalBundleOriginalPrice - bundleDiscount;
+  const selectedBundle = bundleItems.filter((item) => selectedBundleIds.includes(item.slug));
+  const bundleTotal = product.price + selectedBundle.reduce((sum, item) => sum + item.price, 0);
 
   async function handleAddBundleToBag() {
     if (isAddingBundle) return;
     setIsAddingBundle(true);
-
-    // Add main product
-    addToCart({ ...product, selectedColor }, 1);
-
-    // Add selected bundle accessories
-    bundleItems
-      .filter((item) => selectedBundleIds.includes(item.id))
-      .forEach((item) => {
-        addToCart(item, 1);
-      });
-
-    await new Promise((r) => setTimeout(r, 700));
+    const mainAdded = await addToCart({ ...product, selectedColor, selectedSize }, 1);
+    for (const item of selectedBundle) {
+      if (isInStock(item)) await addToCart(item, 1);
+    }
     setIsAddingBundle(false);
-    showToast("Complete styling set added to bag with 15% bundle discount!", "success");
+    if (mainAdded) showToast("The complete look was added to your bag.", "success");
   }
 
-  // Color swatch hex map
-  const colorSwatchMap = {
-    Gold: "#D4AF37",
-    "Rose gold": "#E6A89B",
-    Silver: "#C4C8CC"
-  };
+  const shippingLines = product.shipping?.length
+    ? product.shipping
+    : [
+        `Dispatched within ${commerce.dispatchTime}.`,
+        `Free standard shipping on orders over ${formatPrice(commerce.freeShippingThreshold)}.`,
+        `Standard delivery: ${commerce.standardDelivery}.`,
+        `Express delivery (${commerce.expressDelivery}) available at checkout for ${formatPrice(commerce.expressShippingFee)}.`
+      ];
+
+  const returnLines = product.returns?.length
+    ? product.returns
+    : [
+        `${commerce.returnWindowDays}-day return window from the date of delivery.`,
+        "Items must be unworn, with original tags and packaging intact.",
+        "Approved refunds are issued to the original payment method."
+      ];
 
   return (
     <div className="product-details-page">
-      {/* Breadcrumb Navigation Bar */}
       <nav className="pdp-breadcrumbs-bar" aria-label="Breadcrumb">
         <div className="container">
           <ol className="pdp-breadcrumbs-list">
@@ -301,13 +306,9 @@ export default function ProductDetails() {
         </div>
       </nav>
 
-      {/* Main Product Showcase Section */}
       <section className="product-details-section">
         <div className="container">
           <div className="product-details-grid">
-            {/* ==================================================== */}
-            {/* LEFT SIDE: Large Image, Zoom, Arrows & Thumbnails   */}
-            {/* ==================================================== */}
             <div className="pdp-gallery-column">
               <div
                 className="pdp-main-image-container"
@@ -316,14 +317,10 @@ export default function ProductDetails() {
                 onMouseLeave={() => setIsZoomed(false)}
                 onMouseMove={handleMouseMove}
               >
-                {/* Badge */}
                 {product.badge && (
-                  <span className={`pdp-badge badge-${product.badge.toLowerCase()}`}>
-                    {product.badge}
-                  </span>
+                  <span className={`pdp-badge badge-${product.badge.toLowerCase()}`}>{product.badge}</span>
                 )}
 
-                {/* Main Product Image with Zoom */}
                 <div className="pdp-zoom-viewport">
                   <img
                     src={gallery[activeImage]}
@@ -337,185 +334,204 @@ export default function ProductDetails() {
                   />
                 </div>
 
-                {/* Hover to Zoom indicator */}
                 <div className={`pdp-zoom-indicator ${isZoomed ? "active" : ""}`}>
                   <ZoomIn size={14} />
-                  <span>{isZoomed ? "2.2x Lens Active" : "Hover image to zoom"}</span>
+                  <span>{isZoomed ? "Zoom active" : "Hover image to zoom"}</span>
                 </div>
 
-                {/* Navigation Arrows */}
-                <button
-                  type="button"
-                  className="pdp-gallery-arrow pdp-gallery-arrow-prev"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    prevImage();
-                  }}
-                  aria-label="Previous product image"
-                >
-                  <ChevronLeft size={22} />
-                </button>
+                {gallery.length > 1 && (
+                  <>
+                    <button
+                      type="button"
+                      className="pdp-gallery-arrow pdp-gallery-arrow-prev"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveImage((curr) => (curr - 1 + gallery.length) % gallery.length);
+                      }}
+                      aria-label="Previous product image"
+                    >
+                      <ChevronLeft size={22} />
+                    </button>
+                    <button
+                      type="button"
+                      className="pdp-gallery-arrow pdp-gallery-arrow-next"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveImage((curr) => (curr + 1) % gallery.length);
+                      }}
+                      aria-label="Next product image"
+                    >
+                      <ChevronRight size={22} />
+                    </button>
+                  </>
+                )}
 
-                <button
-                  type="button"
-                  className="pdp-gallery-arrow pdp-gallery-arrow-next"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    nextImage();
-                  }}
-                  aria-label="Next product image"
-                >
-                  <ChevronRight size={22} />
-                </button>
-
-                {/* Counter overlay */}
                 <span className="pdp-gallery-counter">
                   {activeImage + 1} / {gallery.length}
                 </span>
               </div>
 
-              {/* Thumbnail Image Gallery */}
-              <div className="pdp-thumbnails-row">
-                {gallery.map((imgUrl, index) => (
-                  <button
-                    key={`${imgUrl}-${index}`}
-                    type="button"
-                    className={`pdp-thumbnail-button ${
-                      activeImage === index ? "is-active" : ""
-                    }`}
-                    onClick={() => setActiveImage(index)}
-                    aria-label={`View image thumbnail ${index + 1}`}
-                  >
-                    <img src={imgUrl} alt={`${product.name} thumbnail ${index + 1}`} />
-                  </button>
-                ))}
-              </div>
+              {gallery.length > 1 && (
+                <div className="pdp-thumbnails-row">
+                  {gallery.map((imgUrl, index) => (
+                    <button
+                      key={`${imgUrl}-${index}`}
+                      type="button"
+                      className={`pdp-thumbnail-button ${activeImage === index ? "is-active" : ""}`}
+                      onClick={() => setActiveImage(index)}
+                      aria-label={`View image ${index + 1}`}
+                    >
+                      <img src={imgUrl} alt={`${product.name} thumbnail ${index + 1}`} />
+                    </button>
+                  ))}
+                </div>
+              )}
 
-              {/* Quality Guarantee Mini Badges */}
               <div className="pdp-trust-pills-row">
                 <div className="pdp-trust-pill">
                   <Sparkles size={16} />
-                  <span>18K Micro-Gold Micron Plated</span>
+                  <span>{product.finish}</span>
                 </div>
                 <div className="pdp-trust-pill">
                   <ShieldCheck size={16} />
-                  <span>Hypoallergenic &amp; Nickel-Free</span>
+                  <span>{product.material}</span>
                 </div>
                 <div className="pdp-trust-pill">
                   <Award size={16} />
-                  <span>Anti-Tarnish Protective Shield</span>
+                  <span>Quality checked before dispatch</span>
                 </div>
               </div>
             </div>
 
-            {/* ==================================================== */}
-            {/* RIGHT SIDE: Product Info, Options & Buy Box          */}
-            {/* ==================================================== */}
             <div className="pdp-info-column">
-              {/* Eyebrow / Tag */}
               <div className="pdp-eyebrow-row">
                 <span className="pdp-eyebrow-category">{product.category}</span>
                 <span className="pdp-eyebrow-divider">•</span>
-                <span className="pdp-eyebrow-finish">{product.finish || "18K Gold Plated"}</span>
+                <span className="pdp-eyebrow-finish">{product.finish}</span>
               </div>
 
-              {/* Product Title */}
               <h1 className="pdp-title">{product.name}</h1>
 
-              {/* Star Rating & Review Count */}
               <div className="pdp-rating-row">
-                <div className="pdp-stars" aria-label={`Rated ${product.rating} out of 5 stars`}>
-                  {[1, 2, 3, 4, 5].map((star) => (
-                    <Star
-                      key={star}
-                      size={16}
-                      className="pdp-star-icon"
-                      fill={star <= Math.round(product.rating) ? "var(--gold)" : "none"}
-                    />
-                  ))}
-                  <span className="pdp-rating-score">{product.rating}</span>
-                </div>
-
-                <span className="pdp-rating-dot">•</span>
-
-                <button
-                  type="button"
-                  className="pdp-review-link"
-                  onClick={() => {
-                    setOpenAccordions((prev) => ({ ...prev, reviews: true }));
-                    document.getElementById("pdp-reviews-section")?.scrollIntoView({
-                      behavior: "smooth"
-                    });
-                  }}
-                >
-                  {product.reviews || reviewsList.length} reviews
-                </button>
+                {product.reviews > 0 ? (
+                  <>
+                    <div className="pdp-stars" aria-label={`Rated ${product.rating} out of 5 stars`}>
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <Star
+                          key={star}
+                          size={16}
+                          className="pdp-star-icon"
+                          fill={star <= Math.round(product.rating) ? "var(--gold)" : "none"}
+                        />
+                      ))}
+                      <span className="pdp-rating-score">{product.rating}</span>
+                    </div>
+                    <span className="pdp-rating-dot">•</span>
+                    <button
+                      type="button"
+                      className="pdp-review-link"
+                      onClick={() => {
+                        setOpenAccordions((prev) => ({ ...prev, reviews: true }));
+                        document.getElementById("pdp-reviews-section")?.scrollIntoView({ behavior: "smooth" });
+                      }}
+                    >
+                      {product.reviews} {product.reviews === 1 ? "review" : "reviews"}
+                    </button>
+                  </>
+                ) : (
+                  <span className="pdp-review-link">No reviews yet</span>
+                )}
 
                 <span className="pdp-rating-dot">•</span>
 
                 <span className="pdp-in-stock-badge">
-                  <Check size={13} /> In Stock &amp; Ready to Ship
+                  {inStock ? (
+                    <>
+                      <Check size={13} />{" "}
+                      {product.stockQuantity <= commerce.lowStockThreshold
+                        ? `Only ${product.stockQuantity} left`
+                        : "In stock"}
+                    </>
+                  ) : (
+                    "Out of stock"
+                  )}
                 </span>
               </div>
 
-              {/* Pricing Section */}
               <div className="pdp-pricing-box">
                 <div className="pdp-price-line">
                   <span className="pdp-current-price">{formatPrice(product.price)}</span>
-                  {product.oldPrice && (
-                    <del className="pdp-original-price">{formatPrice(product.oldPrice)}</del>
-                  )}
                   {discountPercent > 0 && (
-                    <span className="pdp-discount-tag">{discountPercent}% OFF</span>
+                    <>
+                      <del className="pdp-original-price">{formatPrice(product.oldPrice)}</del>
+                      <span className="pdp-discount-tag">{discountPercent}% OFF</span>
+                    </>
                   )}
                 </div>
-                <p className="pdp-tax-note">Inclusive of all taxes • Free express shipping over ₹1,999</p>
+                <p className="pdp-tax-note">
+                  GST ({commerce.taxPercent}%) added at checkout • Free shipping over{" "}
+                  {formatPrice(commerce.freeShippingThreshold)}
+                </p>
               </div>
 
-              {/* Short Product Description */}
-              <p className="pdp-short-description">{product.description}</p>
+              {product.description && <p className="pdp-short-description">{product.description}</p>}
 
-              {/* Divider */}
               <div className="pdp-divider" />
 
-              {/* Color Selection */}
-              <div className="pdp-option-group">
-                <div className="pdp-option-header">
-                  <span className="pdp-option-label">Color:</span>
-                  <span className="pdp-option-selected-val">{selectedColor}</span>
-                </div>
-
-                <div className="pdp-swatches-row" role="radiogroup" aria-label="Select Color">
-                  {(product.availableColors || ["Gold", "Rose gold", "Silver"]).map((colorName) => {
-                    const isSelected = selectedColor.toLowerCase() === colorName.toLowerCase();
-                    const swatchBg = colorSwatchMap[colorName] || "#D4AF37";
-
-                    return (
+              {product.availableColors?.length > 0 && (
+                <div className="pdp-option-group">
+                  <div className="pdp-option-header">
+                    <span className="pdp-option-label">Color:</span>
+                    <span className="pdp-option-selected-val">{selectedColor}</span>
+                  </div>
+                  <div className="pdp-swatches-row" role="radiogroup" aria-label="Select color">
+                    {product.availableColors.map((colorName) => (
                       <button
                         key={colorName}
                         type="button"
                         role="radio"
-                        aria-checked={isSelected}
-                        className={`pdp-swatch-btn ${isSelected ? "is-selected" : ""}`}
+                        aria-checked={selectedColor === colorName}
+                        className={`pdp-swatch-btn ${selectedColor === colorName ? "is-selected" : ""}`}
                         onClick={() => setSelectedColor(colorName)}
                         title={colorName}
                       >
                         <span
                           className="pdp-swatch-circle"
-                          style={{ backgroundColor: swatchBg }}
+                          style={{ backgroundColor: COLOR_SWATCHES[colorName] || "#D4AF37" }}
                         />
                         <span className="pdp-swatch-text">{colorName}</span>
                       </button>
-                    );
-                  })}
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* Quantity Selector & Main Action Buttons */}
+              {product.availableSizes?.length > 1 && (
+                <div className="pdp-option-group">
+                  <div className="pdp-option-header">
+                    <span className="pdp-option-label">Size:</span>
+                    <span className="pdp-option-selected-val">{selectedSize}</span>
+                  </div>
+                  <div className="pdp-swatches-row" role="radiogroup" aria-label="Select size">
+                    {product.availableSizes.map((size) => (
+                      <button
+                        key={size}
+                        type="button"
+                        role="radio"
+                        aria-checked={selectedSize === size}
+                        className={`pdp-swatch-btn ${selectedSize === size ? "is-selected" : ""}`}
+                        onClick={() => setSelectedSize(size)}
+                      >
+                        <span className="pdp-swatch-text">{size}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="pdp-actions-container">
                 <div className="pdp-qty-and-cart-row">
-                  {/* Quantity Stepper */}
-                  <div className="pdp-quantity-stepper" aria-label="Quantity Selector">
+                  <div className="pdp-quantity-stepper" aria-label="Quantity selector">
                     <button
                       type="button"
                       className="pdp-qty-btn"
@@ -529,23 +545,24 @@ export default function ProductDetails() {
                     <button
                       type="button"
                       className="pdp-qty-btn"
-                      onClick={() => setQuantity((q) => Math.min(10, q + 1))}
-                      disabled={quantity >= 10}
+                      onClick={() => setQuantity((q) => Math.min(maxQuantity, q + 1))}
+                      disabled={quantity >= maxQuantity}
                       aria-label="Increase quantity"
                     >
                       <Plus size={14} />
                     </button>
                   </div>
 
-                  {/* Add to Bag Button with Loading State */}
                   <button
                     type="button"
                     className={`button pdp-add-bag-btn ${isAdded ? "is-added" : ""}`}
                     onClick={handleAddToCart}
-                    disabled={isAdding}
+                    disabled={isAdding || !inStock}
                     id="pdp-add-to-bag-button"
                   >
-                    {isAdding ? (
+                    {!inStock ? (
+                      <span>Out of Stock</span>
+                    ) : isAdding ? (
                       <>
                         <Loader2 size={18} className="pdp-spinner" />
                         <span>Adding to Bag...</span>
@@ -563,7 +580,6 @@ export default function ProductDetails() {
                     )}
                   </button>
 
-                  {/* Wishlist Button */}
                   <button
                     type="button"
                     className={`pdp-wishlist-toggle ${wished ? "is-wished" : ""}`}
@@ -579,24 +595,23 @@ export default function ProductDetails() {
                   </button>
                 </div>
 
-                {/* Buy Now Button */}
                 <button
                   type="button"
                   className="button button-gold pdp-buy-now-btn"
                   onClick={handleBuyNow}
+                  disabled={!inStock}
                   id="pdp-buy-now-button"
                 >
-                  Buy Now — Express Checkout
+                  Buy Now
                 </button>
               </div>
 
-              {/* Estimated Delivery Date & PIN Checker */}
               <div className="pdp-delivery-card">
                 <div className="pdp-delivery-header">
                   <Truck size={18} className="pdp-delivery-truck-icon" />
                   <div className="pdp-delivery-title-box">
-                    <strong>Estimated Delivery: {formattedDeliveryRange}</strong>
-                    <span>Order within next 6 hours for same-day dispatch</span>
+                    <strong>Estimated Delivery: {deliveryRange}</strong>
+                    <span>Dispatched within {commerce.dispatchTime}</span>
                   </div>
                 </div>
 
@@ -619,243 +634,113 @@ export default function ProductDetails() {
                 </form>
 
                 {pinStatus && (
-                  <div
-                    className={`pdp-pin-message ${
-                      pinStatus.success ? "is-success" : "is-error"
-                    }`}
-                  >
+                  <div className={`pdp-pin-message ${pinStatus.success ? "is-success" : "is-error"}`}>
                     {pinStatus.message}
                   </div>
                 )}
               </div>
 
-              {/* Expandable Sections (5 Accordions) */}
               <div className="pdp-accordions-group">
-                {/* 1. Product Details */}
-                <div className="pdp-accordion-item">
-                  <button
-                    type="button"
-                    className={`pdp-accordion-header ${
-                      openAccordions.details ? "is-open" : ""
-                    }`}
-                    onClick={() => toggleAccordion("details")}
-                    aria-expanded={openAccordions.details}
-                  >
-                    <span className="pdp-accordion-title">Product Details</span>
-                    <ChevronDown
-                      size={18}
-                      className={`pdp-accordion-chevron ${
-                        openAccordions.details ? "rotate" : ""
-                      }`}
-                    />
-                  </button>
-                  {openAccordions.details && (
-                    <div className="pdp-accordion-content">
-                      <ul className="pdp-details-list">
-                        {(
-                          product.details || [
-                            "Pendant: 14mm radiant sculpted drop motif",
-                            "Chain: 16 inches + 2-inch extender chain for versatile styling",
-                            "Finish: 18K micro-gold plating with anti-tarnish protective lacquer",
-                            "Base Metal: Hypoallergenic lead-free and nickel-free brass",
-                            "Clasp: Secure lobster claw closure with engraved brand charm",
-                            "Weight: 8.5 grams (featherlight all-day comfort)",
-                            "SKU: LST-AUR-NK01"
-                          ]
-                        ).map((detail, idx) => (
-                          <li key={idx}>
-                            <span className="pdp-bullet-dot">✦</span>
-                            <span>{detail}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
+                {product.details?.length > 0 && (
+                  <Accordion title="Product Details" open={openAccordions.details} onToggle={() => toggleAccordion("details")}>
+                    <ul className="pdp-details-list">
+                      {product.details.map((detail, idx) => (
+                        <li key={idx}>
+                          <span className="pdp-bullet-dot">✦</span>
+                          <span>{detail}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </Accordion>
+                )}
 
-                {/* 2. Material and Care */}
-                <div className="pdp-accordion-item">
-                  <button
-                    type="button"
-                    className={`pdp-accordion-header ${
-                      openAccordions.material ? "is-open" : ""
-                    }`}
-                    onClick={() => toggleAccordion("material")}
-                    aria-expanded={openAccordions.material}
-                  >
-                    <span className="pdp-accordion-title">Material and Care</span>
-                    <ChevronDown
-                      size={18}
-                      className={`pdp-accordion-chevron ${
-                        openAccordions.material ? "rotate" : ""
-                      }`}
-                    />
-                  </button>
-                  {openAccordions.material && (
-                    <div className="pdp-accordion-content">
-                      <p className="pdp-care-intro">
-                        Our pieces are handcrafted using premium, hypoallergenic jeweler&apos;s
-                        brass coated in thick 18K micron gold with a proprietary anti-tarnish shield.
-                      </p>
-                      <ul className="pdp-care-list">
-                        {(
-                          product.care || [
-                            "Avoid direct contact with perfumes, hairsprays, lotions, and harsh household chemicals.",
-                            "Remove before swimming, exercising, bathing, or sleeping.",
-                            "Gently wipe clean with the provided micro-fiber polishing cloth after each wear.",
-                            "Store separately inside the signature velvet dust pouch to prevent scratches."
-                          ]
-                        ).map((tip, idx) => (
-                          <li key={idx}>
-                            <span className="pdp-bullet-dot">✦</span>
-                            <span>{tip}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
+                <Accordion title="Material and Care" open={openAccordions.material} onToggle={() => toggleAccordion("material")}>
+                  <p className="pdp-care-intro">
+                    {product.material} with a {product.finish.toLowerCase()} finish.
+                  </p>
+                  {product.care?.length > 0 ? (
+                    <ul className="pdp-care-list">
+                      {product.care.map((tip, idx) => (
+                        <li key={idx}>
+                          <span className="pdp-bullet-dot">✦</span>
+                          <span>{tip}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>
+                      See our <Link to="/jewelry-care">jewelry care guide</Link> to keep this piece looking its best.
+                    </p>
                   )}
-                </div>
+                </Accordion>
 
-                {/* 3. Shipping Information */}
-                <div className="pdp-accordion-item">
-                  <button
-                    type="button"
-                    className={`pdp-accordion-header ${
-                      openAccordions.shipping ? "is-open" : ""
-                    }`}
-                    onClick={() => toggleAccordion("shipping")}
-                    aria-expanded={openAccordions.shipping}
-                  >
-                    <span className="pdp-accordion-title">Shipping Information</span>
-                    <ChevronDown
-                      size={18}
-                      className={`pdp-accordion-chevron ${
-                        openAccordions.shipping ? "rotate" : ""
-                      }`}
-                    />
-                  </button>
-                  {openAccordions.shipping && (
-                    <div className="pdp-accordion-content">
-                      <ul className="pdp-shipping-list">
-                        {(
-                          product.shipping || [
-                            "Dispatched within 24 hours from our Mumbai studio.",
-                            "Complimentary standard shipping on all orders over ₹1,999 ($50).",
-                            "Standard delivery: 3–5 business days with live SMS tracking.",
-                            "Express delivery available at checkout for next-day dispatch.",
-                            "All pieces arrive in an unboxing-ready signature velvet box and gift bag."
-                          ]
-                        ).map((item, idx) => (
-                          <li key={idx}>
-                            <Truck size={15} className="pdp-list-icon" />
-                            <span>{item}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
+                <Accordion title="Shipping Information" open={openAccordions.shipping} onToggle={() => toggleAccordion("shipping")}>
+                  <ul className="pdp-shipping-list">
+                    {shippingLines.map((item, idx) => (
+                      <li key={idx}>
+                        <Truck size={15} className="pdp-list-icon" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </Accordion>
 
-                {/* 4. Return Policy */}
-                <div className="pdp-accordion-item">
-                  <button
-                    type="button"
-                    className={`pdp-accordion-header ${
-                      openAccordions.returns ? "is-open" : ""
-                    }`}
-                    onClick={() => toggleAccordion("returns")}
-                    aria-expanded={openAccordions.returns}
-                  >
-                    <span className="pdp-accordion-title">Return Policy</span>
-                    <ChevronDown
-                      size={18}
-                      className={`pdp-accordion-chevron ${
-                        openAccordions.returns ? "rotate" : ""
-                      }`}
-                    />
-                  </button>
-                  {openAccordions.returns && (
-                    <div className="pdp-accordion-content">
-                      <ul className="pdp-returns-list">
-                        {(
-                          product.returns || [
-                            "7-day doorstep return and exchange window from the date of delivery.",
-                            "Free return pickup arranged directly from your shipping address.",
-                            "Items must be in unworn condition with original tags and packaging intact.",
-                            "Full refund processed within 48 hours of return receipt."
-                          ]
-                        ).map((item, idx) => (
-                          <li key={idx}>
-                            <RotateCcw size={15} className="pdp-list-icon" />
-                            <span>{item}</span>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
+                <Accordion title="Return Policy" open={openAccordions.returns} onToggle={() => toggleAccordion("returns")}>
+                  <ul className="pdp-returns-list">
+                    {returnLines.map((item, idx) => (
+                      <li key={idx}>
+                        <RotateCcw size={15} className="pdp-list-icon" />
+                        <span>{item}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </Accordion>
 
-                {/* 5. Customer Reviews */}
-                <div className="pdp-accordion-item" id="pdp-reviews-section">
-                  <button
-                    type="button"
-                    className={`pdp-accordion-header ${
-                      openAccordions.reviews ? "is-open" : ""
-                    }`}
-                    onClick={() => toggleAccordion("reviews")}
-                    aria-expanded={openAccordions.reviews}
-                  >
-                    <span className="pdp-accordion-title">
-                      Customer Reviews ({reviewsList.length})
-                    </span>
-                    <ChevronDown
-                      size={18}
-                      className={`pdp-accordion-chevron ${
-                        openAccordions.reviews ? "rotate" : ""
-                      }`}
-                    />
-                  </button>
-                  {openAccordions.reviews && (
-                    <div className="pdp-accordion-content pdp-reviews-content">
-                      {/* Rating Score Card */}
+                <Accordion
+                  id="pdp-reviews-section"
+                  title={`Customer Reviews (${totalReviews})`}
+                  open={openAccordions.reviews}
+                  onToggle={() => toggleAccordion("reviews")}
+                >
+                  <div className="pdp-reviews-content">
+                    {totalReviews > 0 && (
                       <div className="pdp-rating-overview-card">
                         <div className="pdp-score-block">
                           <span className="pdp-big-score">{product.rating}</span>
                           <div className="pdp-stars">
                             {[1, 2, 3, 4, 5].map((s) => (
-                              <Star key={s} size={15} fill="var(--gold)" color="var(--gold)" />
+                              <Star
+                                key={s}
+                                size={15}
+                                fill={s <= Math.round(product.rating) ? "var(--gold)" : "none"}
+                                color="var(--gold)"
+                              />
                             ))}
                           </div>
                           <span className="pdp-total-count">
-                            Based on {product.reviews || reviewsList.length} reviews
+                            Based on {totalReviews} {totalReviews === 1 ? "review" : "reviews"}
                           </span>
                         </div>
 
-                        {/* Breakdown Bars */}
                         <div className="pdp-breakdown-bars">
-                          {[
-                            { stars: 5, pct: 88 },
-                            { stars: 4, pct: 9 },
-                            { stars: 3, pct: 2 },
-                            { stars: 2, pct: 1 },
-                            { stars: 1, pct: 0 }
-                          ].map((bar) => (
-                            <div key={bar.stars} className="pdp-bar-row">
-                              <span className="pdp-bar-label">{bar.stars}★</span>
-                              <div className="pdp-bar-track">
-                                <div
-                                  className="pdp-bar-fill"
-                                  style={{ width: `${bar.pct}%` }}
-                                />
+                          {reviewData.distribution.map((bar) => {
+                            const pct = totalReviews ? Math.round((bar.count / totalReviews) * 100) : 0;
+                            return (
+                              <div key={bar.stars} className="pdp-bar-row">
+                                <span className="pdp-bar-label">{bar.stars}★</span>
+                                <div className="pdp-bar-track">
+                                  <div className="pdp-bar-fill" style={{ width: `${pct}%` }} />
+                                </div>
+                                <span className="pdp-bar-pct">{pct}%</span>
                               </div>
-                              <span className="pdp-bar-pct">{bar.pct}%</span>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
+                    )}
 
-                      {/* Write a Review Button */}
-                      <div className="pdp-review-actions-bar">
+                    <div className="pdp-review-actions-bar">
+                      {user ? (
                         <button
                           type="button"
                           className="button button-outline"
@@ -863,287 +748,237 @@ export default function ProductDetails() {
                         >
                           {showReviewForm ? "Cancel Review" : "Write a Review"}
                         </button>
-                      </div>
-
-                      {/* Review Form */}
-                      {showReviewForm && (
-                        <form onSubmit={handleReviewSubmit} className="pdp-review-form">
-                          <h4>Share your experience with Lustre &amp; Co.</h4>
-
-                          <div className="pdp-form-field">
-                            <label>Rating</label>
-                            <div className="pdp-star-picker">
-                              {[1, 2, 3, 4, 5].map((val) => (
-                                <button
-                                  key={val}
-                                  type="button"
-                                  onClick={() => setReviewRating(val)}
-                                  className="pdp-star-picker-btn"
-                                >
-                                  <Star
-                                    size={20}
-                                    fill={val <= reviewRating ? "var(--gold)" : "none"}
-                                    color="var(--gold)"
-                                  />
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-
-                          <div className="pdp-form-field">
-                            <label>Your Name *</label>
-                            <input
-                              type="text"
-                              required
-                              value={reviewerName}
-                              onChange={(e) => setReviewerName(e.target.value)}
-                              placeholder="e.g. Shalini K."
-                            />
-                          </div>
-
-                          <div className="pdp-form-field">
-                            <label>Review Headline</label>
-                            <input
-                              type="text"
-                              value={reviewTitle}
-                              onChange={(e) => setReviewTitle(e.target.value)}
-                              placeholder="e.g. Even more radiant in person!"
-                            />
-                          </div>
-
-                          <div className="pdp-form-field">
-                            <label>Your Review *</label>
-                            <textarea
-                              rows={3}
-                              required
-                              value={reviewComment}
-                              onChange={(e) => setReviewComment(e.target.value)}
-                              placeholder="Describe the fit, luster, and everyday wear..."
-                            />
-                          </div>
-
-                          <button type="submit" className="button button-dark">
-                            Submit Verified Review
-                          </button>
-
-                          {reviewSubmitted && (
-                            <p className="pdp-form-success">
-                              ✓ Thank you! Your review has been added.
-                            </p>
-                          )}
-                        </form>
+                      ) : (
+                        <p className="review-login-note">
+                          <Link to="/account/login" state={{ from: location.pathname }}>
+                            Sign in
+                          </Link>{" "}
+                          to write a review.
+                        </p>
                       )}
+                    </div>
 
-                      {/* Review Cards List */}
-                      <div className="pdp-reviews-list">
-                        {reviewsList.map((rev) => (
-                          <div key={rev.id} className="pdp-review-card">
-                            <div className="pdp-rev-header">
-                              <div className="pdp-rev-author-group">
-                                <strong>{rev.author}</strong>
-                                {rev.verified && (
-                                  <span className="pdp-verified-badge">
-                                    <Check size={11} /> Verified Buyer
-                                  </span>
-                                )}
-                              </div>
-                              <span className="pdp-rev-date">{rev.date}</span>
-                            </div>
+                    {showReviewForm && user && (
+                      <form onSubmit={handleReviewSubmit} className="pdp-review-form">
+                        <h4>Share your experience</h4>
 
-                            <div className="pdp-rev-stars">
-                              {[1, 2, 3, 4, 5].map((s) => (
-                                <Star
-                                  key={s}
-                                  size={13}
-                                  fill={s <= rev.rating ? "var(--gold)" : "none"}
-                                  color="var(--gold)"
-                                />
-                              ))}
-                            </div>
-
-                            <h5 className="pdp-rev-title">{rev.title}</h5>
-                            <p className="pdp-rev-text">{rev.comment}</p>
+                        <div className="pdp-form-field">
+                          <label>Rating</label>
+                          <div className="pdp-star-picker">
+                            {[1, 2, 3, 4, 5].map((val) => (
+                              <button
+                                key={val}
+                                type="button"
+                                onClick={() => setReviewForm((f) => ({ ...f, rating: val }))}
+                                className="pdp-star-picker-btn"
+                                aria-label={`${val} star${val > 1 ? "s" : ""}`}
+                              >
+                                <Star size={20} fill={val <= reviewForm.rating ? "var(--gold)" : "none"} color="var(--gold)" />
+                              </button>
+                            ))}
                           </div>
-                        ))}
+                        </div>
+
+                        <div className="pdp-form-field">
+                          <label>Review Headline *</label>
+                          <input
+                            type="text"
+                            required
+                            maxLength={120}
+                            value={reviewForm.title}
+                            onChange={(e) => setReviewForm((f) => ({ ...f, title: e.target.value }))}
+                            placeholder="e.g. Even more radiant in person!"
+                          />
+                        </div>
+
+                        <div className="pdp-form-field">
+                          <label>Your Review *</label>
+                          <textarea
+                            rows={3}
+                            required
+                            maxLength={2000}
+                            value={reviewForm.comment}
+                            onChange={(e) => setReviewForm((f) => ({ ...f, comment: e.target.value }))}
+                            placeholder="Describe the fit, finish, and everyday wear..."
+                          />
+                        </div>
+
+                        <button type="submit" className="button button-dark" disabled={isSubmittingReview}>
+                          {isSubmittingReview ? "Submitting…" : "Submit Review"}
+                        </button>
+
+                        {reviewMessage && (
+                          <p className={reviewMessage.success ? "pdp-form-success" : "form-error"}>{reviewMessage.text}</p>
+                        )}
+                      </form>
+                    )}
+
+                    <div className="pdp-reviews-list">
+                      {totalReviews === 0 && <p className="review-login-note">Be the first to review this piece.</p>}
+                      {reviewData.reviews.map((rev) => (
+                        <div key={rev._id} className="pdp-review-card">
+                          <div className="pdp-rev-header">
+                            <div className="pdp-rev-author-group">
+                              <strong>{rev.author}</strong>
+                              {rev.verifiedPurchase && (
+                                <span className="pdp-verified-badge">
+                                  <Check size={11} /> Verified Buyer
+                                </span>
+                              )}
+                            </div>
+                            <span className="pdp-rev-date">
+                              {new Date(rev.createdAt).toLocaleDateString("en-US", {
+                                month: "short",
+                                day: "numeric",
+                                year: "numeric"
+                              })}
+                            </span>
+                          </div>
+
+                          <div className="pdp-rev-stars">
+                            {[1, 2, 3, 4, 5].map((s) => (
+                              <Star key={s} size={13} fill={s <= rev.rating ? "var(--gold)" : "none"} color="var(--gold)" />
+                            ))}
+                          </div>
+
+                          <h5 className="pdp-rev-title">{rev.title}</h5>
+                          <p className="pdp-rev-text">{rev.comment}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </Accordion>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {bundleItems.length > 0 && (
+        <section className="section pdp-complete-look-section">
+          <div className="container">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Curated Ensemble</span>
+                <h2>Complete the Look</h2>
+              </div>
+              <p className="section-heading-sub">Pieces that pair beautifully with the {product.name}.</p>
+            </div>
+
+            <div className="pdp-bundle-container">
+              <div className="pdp-bundle-items-grid">
+                <div className="pdp-bundle-card is-anchor">
+                  <div className="pdp-bundle-thumb">
+                    <img src={gallery[0]} alt={product.name} />
+                    <span className="pdp-bundle-tag">This Piece</span>
+                  </div>
+                  <div className="pdp-bundle-info">
+                    <h4 className="pdp-bundle-item-name">{product.name}</h4>
+                    <div className="pdp-bundle-item-price">
+                      <strong>{formatPrice(product.price)}</strong>
+                    </div>
+                    <span className="pdp-bundle-checked-indicator">
+                      <Check size={14} /> Selected
+                    </span>
+                  </div>
+                </div>
+
+                {bundleItems.map((item) => {
+                  const isSelected = selectedBundleIds.includes(item.slug);
+                  return (
+                    <div
+                      key={item.slug}
+                      className={`pdp-bundle-card ${isSelected ? "is-selected" : "is-deselected"}`}
+                      onClick={() => toggleBundleItem(item.slug)}
+                    >
+                      <div className="pdp-bundle-thumb">
+                        <img src={item.image} alt={item.name} />
+                        <button
+                          type="button"
+                          className={`pdp-bundle-checkbox ${isSelected ? "checked" : ""}`}
+                          aria-label={`Toggle ${item.name} in the look`}
+                        >
+                          {isSelected && <Check size={12} />}
+                        </button>
+                      </div>
+                      <div className="pdp-bundle-info">
+                        <h4 className="pdp-bundle-item-name">{item.name}</h4>
+                        <div className="pdp-bundle-item-price">
+                          <strong>{formatPrice(item.price)}</strong>
+                        </div>
+                        <span className="pdp-bundle-category-tag">{item.category}</span>
                       </div>
                     </div>
+                  );
+                })}
+              </div>
+
+              <div className="pdp-bundle-summary-card">
+                <div className="pdp-bundle-price-row">
+                  <div>
+                    <span className="pdp-bundle-total-label">Total for {1 + selectedBundle.length} pieces:</span>
+                    <div className="pdp-bundle-price-nums">
+                      <strong className="pdp-bundle-final-price">{formatPrice(bundleTotal)}</strong>
+                    </div>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  className="button button-gold pdp-bundle-cta-btn"
+                  onClick={handleAddBundleToBag}
+                  disabled={isAddingBundle || !inStock}
+                  id="pdp-add-bundle-button"
+                >
+                  {isAddingBundle ? (
+                    <>
+                      <Loader2 size={16} className="pdp-spinner" />
+                      <span>Adding to Bag...</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShoppingBag size={16} />
+                      <span>Add Complete Look to Bag</span>
+                    </>
                   )}
-                </div>
+                </button>
               </div>
             </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
-      {/* ==================================================== */}
-      {/* SECTION: Complete the Look (Curated Styling Bundle)  */}
-      {/* ==================================================== */}
-      <section className="section pdp-complete-look-section">
-        <div className="container">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">Curated Ensemble</span>
-              <h2>Complete the Look</h2>
-            </div>
-            <p className="section-heading-sub">
-              Carefully chosen pairings that mirror the radiance of your Aurora necklace.
-            </p>
-          </div>
-
-          <div className="pdp-bundle-container">
-            {/* Bundle Product Cards */}
-            <div className="pdp-bundle-items-grid">
-              {/* Primary Anchor item: Aurora Necklace */}
-              <div className="pdp-bundle-card is-anchor">
-                <div className="pdp-bundle-thumb">
-                  <img src={product.gallery[0]} alt={product.name} />
-                  <span className="pdp-bundle-tag">This Piece</span>
-                </div>
-                <div className="pdp-bundle-info">
-                  <h4 className="pdp-bundle-item-name">{product.name}</h4>
-                  <div className="pdp-bundle-item-price">
-                    <strong>{formatPrice(product.price)}</strong>
-                    {product.oldPrice && <del>{formatPrice(product.oldPrice)}</del>}
-                  </div>
-                  <span className="pdp-bundle-checked-indicator">
-                    <Check size={14} /> Selected
-                  </span>
-                </div>
+      {related.length > 0 && (
+        <section className="section pdp-recommendations-section">
+          <div className="container">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Recommendations</span>
+                <h2>You May Also Like</h2>
               </div>
-
-              {/* Complementary Bundle items */}
-              {bundleItems.map((item) => {
-                const isSelected = selectedBundleIds.includes(item.id);
-
-                return (
-                  <div
-                    key={item.id}
-                    className={`pdp-bundle-card ${isSelected ? "is-selected" : "is-deselected"}`}
-                    onClick={() => toggleBundleItem(item.id)}
-                  >
-                    <div className="pdp-bundle-thumb">
-                      <img src={item.image} alt={item.name} />
-                      <button
-                        type="button"
-                        className={`pdp-bundle-checkbox ${isSelected ? "checked" : ""}`}
-                        aria-label={`Toggle ${item.name} in bundle`}
-                      >
-                        {isSelected && <Check size={12} />}
-                      </button>
-                    </div>
-                    <div className="pdp-bundle-info">
-                      <h4 className="pdp-bundle-item-name">{item.name}</h4>
-                      <div className="pdp-bundle-item-price">
-                        <strong>{formatPrice(item.price)}</strong>
-                        {item.oldPrice && <del>{formatPrice(item.oldPrice)}</del>}
-                      </div>
-                      <span className="pdp-bundle-category-tag">{item.category}</span>
-                    </div>
-                  </div>
-                );
-              })}
+              <Link to="/shop" className="pdp-see-all-link">
+                Explore all jewelry →
+              </Link>
             </div>
 
-            {/* Bundle Checkout Box */}
-            <div className="pdp-bundle-summary-card">
-              <span className="pdp-bundle-savings-badge">
-                Save 15% on Bundle Set
-              </span>
-              <div className="pdp-bundle-price-row">
-                <div>
-                  <span className="pdp-bundle-total-label">
-                    Bundle for {1 + selectedBundleIds.length} pieces:
-                  </span>
-                  <div className="pdp-bundle-price-nums">
-                    <strong className="pdp-bundle-final-price">
-                      {formatPrice(finalBundlePrice)}
-                    </strong>
-                    <del className="pdp-bundle-old-price">
-                      {formatPrice(totalBundleOriginalPrice)}
-                    </del>
-                  </div>
-                </div>
-
-                <span className="pdp-bundle-discount-amount">
-                  Save {formatPrice(bundleDiscount)}
-                </span>
-              </div>
-
-              <button
-                type="button"
-                className="button button-gold pdp-bundle-cta-btn"
-                onClick={handleAddBundleToBag}
-                disabled={isAddingBundle}
-                id="pdp-add-bundle-button"
-              >
-                {isAddingBundle ? (
-                  <>
-                    <Loader2 size={16} className="pdp-spinner" />
-                    <span>Adding Set to Bag...</span>
-                  </>
-                ) : (
-                  <>
-                    <ShoppingBag size={16} />
-                    <span>Add Complete Look to Bag</span>
-                  </>
-                )}
-              </button>
-              <p className="pdp-bundle-guarantee">
-                Includes signature gift packaging &amp; 7-day doorstep exchange.
-              </p>
+            <div className="product-grid" id="pdp-you-may-also-like-grid">
+              {related.map((relProduct, idx) => (
+                <ProductCard key={relProduct.slug} product={relProduct} index={idx} showQuickView={true} />
+              ))}
             </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
 
-      {/* ==================================================== */}
-      {/* SECTION: You May Also Like (Matching Recommendations)*/}
-      {/* ==================================================== */}
-      <section className="section pdp-recommendations-section">
-        <div className="container">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">Recommendations</span>
-              <h2>You May Also Like</h2>
-            </div>
-            <Link to="/shop" className="pdp-see-all-link">
-              Explore all jewelry →
-            </Link>
-          </div>
-
-          <div className="product-grid" id="pdp-you-may-also-like-grid">
-            {relatedProducts.map((relProduct, idx) => (
-              <ProductCard
-                key={relProduct.id}
-                product={relProduct}
-                index={idx}
-                showQuickView={true}
-              />
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ==================================================== */}
-      {/* STICKY MOBILE ADD-TO-CART BAR (<768px)               */}
-      {/* ==================================================== */}
       <aside className="pdp-sticky-mobile-bar" aria-label="Quick Add to Bag">
         <div className="sticky-bar-inner">
           <div className="sticky-product-info">
-            <img
-              src={gallery[0]}
-              alt={product.name}
-              className="sticky-product-thumb"
-            />
+            <img src={gallery[0]} alt={product.name} className="sticky-product-thumb" />
             <div className="sticky-product-text">
               <span className="sticky-product-title">{product.name}</span>
               <div className="sticky-price-row">
                 <span className="sticky-current-price">{formatPrice(product.price)}</span>
-                {product.oldPrice && (
-                  <span className="sticky-original-price">
-                    {formatPrice(product.oldPrice)}
-                  </span>
-                )}
+                {discountPercent > 0 && <span className="sticky-original-price">{formatPrice(product.oldPrice)}</span>}
               </div>
             </div>
           </div>
@@ -1153,10 +988,12 @@ export default function ProductDetails() {
               type="button"
               className={`button button-dark sticky-add-btn ${isAdded ? "is-added" : ""}`}
               onClick={handleAddToCart}
-              disabled={isAdding}
+              disabled={isAdding || !inStock}
               aria-label={`Add ${product.name} to bag`}
             >
-              {isAdding ? (
+              {!inStock ? (
+                <span>Sold Out</span>
+              ) : isAdding ? (
                 <>
                   <Loader2 size={16} className="pdp-spinner" />
                   <span>Adding...</span>

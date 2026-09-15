@@ -17,11 +17,14 @@ import ProductCard from "../components/ProductCard";
 import PromotionalBanner from "../components/PromotionalBanner";
 import WhyShopWithUs from "../components/WhyShopWithUs";
 import PageIntro from "../components/PageIntro";
-import { products } from "../data/products";
+import { useStore } from "../context/StoreContext";
 
 export default function CardShowcase() {
+  const { products } = useStore();
   const [deviceView, setDeviceView] = useState("desktop"); // 'desktop' or 'mobile'
   const [filterBadge, setFilterBadge] = useState("all");
+
+  if (products.length < 4) return null;
 
   // Sample items representing New, Bestseller, Sale
   const bestsellerProduct = products.find((p) => p.badge === "Bestseller") || products[0];

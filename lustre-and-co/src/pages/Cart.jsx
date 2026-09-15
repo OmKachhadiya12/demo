@@ -4,21 +4,19 @@ import {
   Trash2,
   Heart,
   ArrowLeft,
-  LockKeyhole,
   Truck,
   ShieldCheck,
   Tag,
-  Check,
   Sparkles,
   ShoppingBag,
   Plus,
   Minus,
   X,
-  CreditCard,
   Gift
 } from "lucide-react";
-import { formatPrice, products } from "../data/products";
+import { COLOR_SWATCHES, formatPrice } from "../data/products";
 import { useStore } from "../context/StoreContext";
+import { useSettings } from "../context/SettingsContext";
 import ProductCard from "../components/ProductCard";
 
 export default function Cart() {
@@ -37,62 +35,44 @@ export default function Cart() {
     moveToWishlist,
     applyPromoCode,
     removePromoCode,
-    addToCart
+    products,
+    authReady,
+    productsStatus
   } = useStore();
+  const { settings } = useSettings();
+  const { commerce, payments } = settings;
 
   const [promoInput, setPromoInput] = useState("");
   const [promoMessage, setPromoMessage] = useState(null);
+  const [isApplying, setIsApplying] = useState(false);
 
-  // Free shipping threshold
-  // Standard threshold: ₹1,999 ($50 USD equivalent)
-  const FREE_SHIPPING_THRESHOLD = 1999;
-  const isFreeShippingUnlocked = cartSubtotal >= FREE_SHIPPING_THRESHOLD || appliedPromo?.freeShipping;
-  const remainingForFreeShipping = Math.max(0, FREE_SHIPPING_THRESHOLD - cartSubtotal);
-  const freeShippingProgress = Math.min(
-    100,
-    Math.round((cartSubtotal / FREE_SHIPPING_THRESHOLD) * 100)
-  );
-
-  // Recommended products (excluding items currently in cart)
-  const cartProductIds = useMemo(
-    () => new Set(cart.map((item) => item.product?.id || item.id)),
-    [cart]
-  );
+  const threshold = commerce.freeShippingThreshold;
+  const isFreeShippingUnlocked = cartSubtotal >= threshold || appliedPromo?.freeShipping;
+  const remainingForFreeShipping = Math.max(0, threshold - cartSubtotal);
+  const freeShippingProgress = threshold > 0 ? Math.min(100, Math.round((cartSubtotal / threshold) * 100)) : 100;
 
   const recommendedProducts = useMemo(() => {
+    const inBag = new Set(cart.map((item) => item.product.slug));
     return products
-      .filter((product) => !cartProductIds.has(product.id))
+      .filter((product) => !inBag.has(product.slug))
+      .sort((a, b) => (b.salesCount || 0) - (a.salesCount || 0))
       .slice(0, 4);
-  }, [cartProductIds]);
+  }, [cart, products]);
 
-  // Color swatch hex map
-  const colorSwatchMap = {
-    Gold: "#D4AF37",
-    "Rose gold": "#E6A89B",
-    Silver: "#C4C8CC"
-  };
-
-  // Promo code submission handler
-  function handleApplyPromo(e) {
+  async function handleApplyPromo(e) {
     e.preventDefault();
     if (!promoInput.trim()) return;
-
-    const res = applyPromoCode(promoInput);
+    setIsApplying(true);
+    const res = await applyPromoCode(promoInput);
+    setIsApplying(false);
     setPromoMessage(res);
-    if (res.success) {
-      setPromoInput("");
-    }
+    if (res.success) setPromoInput("");
   }
 
-  // Quick starter helper for demonstration if cart was cleared
-  function handleAddSampleItem() {
-    const flagship = products.find((p) => p.id === "p0") || products[0];
-    addToCart({ ...flagship, selectedColor: "Gold", selectedSize: 'Standard (16" + 2")' }, 1);
-  }
+  const isLoading = !authReady || productsStatus === "loading";
 
   return (
     <div className="cart-page">
-      {/* Breadcrumb Navigation Bar */}
       <nav className="pdp-breadcrumbs-bar" aria-label="Breadcrumb">
         <div className="container">
           <ol className="pdp-breadcrumbs-list">
@@ -113,7 +93,6 @@ export default function Cart() {
 
       <section className="section cart-section">
         <div className="container">
-          {/* Page Header */}
           <div className="cart-header-row">
             <div>
               <span className="eyebrow">Your Selections</span>
@@ -126,36 +105,23 @@ export default function Cart() {
             )}
           </div>
 
-          {cart.length === 0 ? (
-            /* Empty State */
+          {isLoading ? (
+            <p className="catalog-loading">Loading your bag…</p>
+          ) : cart.length === 0 ? (
             <div className="cart-empty-container">
               <div className="cart-empty-icon-wrap">
                 <ShoppingBag size={42} strokeWidth={1.2} />
               </div>
               <h2>Your shopping bag is empty</h2>
-              <p>
-                Explore our fine imitation jewelry collection crafted with 18K micro-gold
-                finish and anti-tarnish protection.
-              </p>
+              <p>Explore our jewelry collection and add the pieces you love.</p>
               <div className="cart-empty-actions">
                 <Link to="/shop" className="button button-dark">
                   Explore Catalog
                 </Link>
-                <button
-                  type="button"
-                  className="button button-outline"
-                  onClick={handleAddSampleItem}
-                  id="add-sample-cart-button"
-                >
-                  <Sparkles size={16} />
-                  Add Aurora Necklace (Demo)
-                </button>
               </div>
             </div>
           ) : (
-            /* Active Cart Layout */
             <>
-              {/* Free-Shipping Progress Bar */}
               <div className="free-shipping-card" id="free-shipping-progress-banner">
                 <div className="free-shipping-header">
                   <div className="free-shipping-msg-wrap">
@@ -164,37 +130,33 @@ export default function Cart() {
                       {isFreeShippingUnlocked ? (
                         <>
                           <strong>Congratulations!</strong> You have unlocked{" "}
-                          <span className="free-shipping-highlight">FREE Express Shipping</span>!
+                          <span className="free-shipping-highlight">free shipping</span>.
                         </>
                       ) : (
                         <>
-                          You are <strong>$15 away from free shipping.</strong>{" "}
-                          <span className="free-shipping-sub">
-                            (Add {formatPrice(remainingForFreeShipping)} more to qualify)
-                          </span>
+                          You are <strong>{formatPrice(remainingForFreeShipping)} away from free shipping.</strong>
                         </>
                       )}
                     </span>
                   </div>
-                  <span className="free-shipping-pct-tag">
-                    {freeShippingProgress}%
-                  </span>
+                  <span className="free-shipping-pct-tag">{isFreeShippingUnlocked ? 100 : freeShippingProgress}%</span>
                 </div>
 
-                {/* Visual Progress Bar Track */}
-                <div className="free-shipping-track" role="progressbar" aria-valuenow={freeShippingProgress} aria-valuemin={0} aria-valuemax={100}>
+                <div
+                  className="free-shipping-track"
+                  role="progressbar"
+                  aria-valuenow={freeShippingProgress}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                >
                   <div
                     className={`free-shipping-fill ${isFreeShippingUnlocked ? "is-unlocked" : ""}`}
-                    style={{ width: `${freeShippingProgress}%` }}
+                    style={{ width: `${isFreeShippingUnlocked ? 100 : freeShippingProgress}%` }}
                   />
                 </div>
               </div>
 
-              {/* Main 2-Column Split Cart Layout */}
               <div className="cart-layout">
-                {/* ==================================================== */}
-                {/* LEFT COLUMN: Cart Items List                         */}
-                {/* ==================================================== */}
                 <div className="cart-items-column">
                   <div className="cart-items-table-header">
                     <span>Product &amp; Details</span>
@@ -203,77 +165,59 @@ export default function Cart() {
 
                   <div className="cart-items-list">
                     {cart.map((item) => {
-                      const prod = item.product || {};
-                      const itemColor =
-                        item.selectedColor || prod.selectedColor || prod.color || "Gold";
-                      const itemSize =
-                        item.selectedSize || prod.selectedSize || 'Standard (16" + 2")';
-                      const itemUnitPrice = prod.price || 0;
-                      const itemTotalPrice = itemUnitPrice * item.quantity;
-                      const swatchColor = colorSwatchMap[itemColor] || "#D4AF37";
+                      const prod = item.product;
+                      const maxQuantity = Math.max(1, Math.min(10, prod.stockQuantity ?? 10));
 
                       return (
                         <article className="cart-item-card" key={item.id} id={`cart-item-${item.id}`}>
-                          {/* Product Image */}
-                          <Link
-                            to={`/product/${prod.slug || "aurora-gold-plated-necklace"}`}
-                            className="cart-item-image-wrap"
-                          >
-                            <img
-                              src={prod.image || prod.gallery?.[0]}
-                              alt={prod.name}
-                              className="cart-item-image"
-                            ></img>
+                          <Link to={`/product/${prod.slug}`} className="cart-item-image-wrap">
+                            <img src={prod.image} alt={prod.name} className="cart-item-image" />
                           </Link>
 
-                          {/* Product Details & Actions */}
                           <div className="cart-item-content">
                             <div className="cart-item-top-row">
                               <div>
                                 <span className="cart-item-category">
-                                  {prod.category || "Jewelry"} • {prod.finish || "18K Gold Plated"}
+                                  {prod.category} • {prod.finish}
                                 </span>
                                 <h3 className="cart-item-title">
-                                  <Link to={`/product/${prod.slug || "aurora-gold-plated-necklace"}`}>
-                                    {prod.name}
-                                  </Link>
+                                  <Link to={`/product/${prod.slug}`}>{prod.name}</Link>
                                 </h3>
                               </div>
-
-                              {/* Item Total Price (Desktop View) */}
                               <div className="cart-item-total-price">
-                                <strong>{formatPrice(itemTotalPrice)}</strong>
+                                <strong>{formatPrice(prod.price * item.quantity)}</strong>
                               </div>
                             </div>
 
-                            {/* Selected Color & Size Metadata */}
                             <div className="cart-item-attributes">
                               <div className="cart-item-badge-pill">
                                 <span
                                   className="cart-swatch-dot"
-                                  style={{ backgroundColor: swatchColor }}
+                                  style={{ backgroundColor: COLOR_SWATCHES[item.selectedColor] || "#D4AF37" }}
                                 />
-                                <span>Color: <strong>{itemColor}</strong></span>
+                                <span>
+                                  Color: <strong>{item.selectedColor}</strong>
+                                </span>
                               </div>
-
-                              <div className="cart-item-badge-pill">
-                                <span>Size: <strong>{itemSize}</strong></span>
-                              </div>
-                            </div>
-
-                            {/* Unit Price Display */}
-                            <div className="cart-item-unit-price">
-                              <span>Unit Price: <strong>{formatPrice(itemUnitPrice)}</strong> each</span>
-                              {prod.oldPrice && (
-                                <del className="cart-item-unit-old-price">
-                                  {formatPrice(prod.oldPrice)}
-                                </del>
+                              {item.selectedSize && (
+                                <div className="cart-item-badge-pill">
+                                  <span>
+                                    Size: <strong>{item.selectedSize}</strong>
+                                  </span>
+                                </div>
                               )}
                             </div>
 
-                            {/* Controls Row: Stepper & Action Buttons */}
+                            <div className="cart-item-unit-price">
+                              <span>
+                                Unit Price: <strong>{formatPrice(prod.price)}</strong> each
+                              </span>
+                              {prod.oldPrice > prod.price && (
+                                <del className="cart-item-unit-old-price">{formatPrice(prod.oldPrice)}</del>
+                              )}
+                            </div>
+
                             <div className="cart-item-controls-row">
-                              {/* Quantity Stepper */}
                               <div className="cart-quantity-stepper" aria-label="Adjust quantity">
                                 <button
                                   type="button"
@@ -290,31 +234,27 @@ export default function Cart() {
                                   className="cart-qty-btn"
                                   onClick={() => updateQuantity(item.id, item.quantity + 1)}
                                   aria-label="Increase quantity"
-                                  disabled={item.quantity >= 10}
+                                  disabled={item.quantity >= maxQuantity}
                                 >
                                   <Plus size={13} />
                                 </button>
                               </div>
 
-                              {/* Move to Wishlist Action Button */}
                               <button
                                 type="button"
                                 className="cart-action-btn cart-wishlist-btn"
                                 onClick={() => moveToWishlist(item)}
                                 aria-label={`Move ${prod.name} to wishlist`}
-                                id={`move-wishlist-${item.id}`}
                               >
                                 <Heart size={15} />
                                 <span>Move to Wishlist</span>
                               </button>
 
-                              {/* Remove Item Action Button */}
                               <button
                                 type="button"
                                 className="cart-action-btn cart-remove-btn"
                                 onClick={() => removeFromCart(item.id)}
-                                aria-label={`Remove ${prod.name} from cart`}
-                                id={`remove-item-${item.id}`}
+                                aria-label={`Remove ${prod.name} from bag`}
                               >
                                 <Trash2 size={15} />
                                 <span>Remove</span>
@@ -326,7 +266,6 @@ export default function Cart() {
                     })}
                   </div>
 
-                  {/* Return to Shop Link */}
                   <div className="cart-bottom-nav">
                     <Link to="/shop" className="back-shopping-link">
                       <ArrowLeft size={16} />
@@ -335,9 +274,6 @@ export default function Cart() {
                   </div>
                 </div>
 
-                {/* ==================================================== */}
-                {/* RIGHT COLUMN: Order Summary (Sticky)                 */}
-                {/* ==================================================== */}
                 <aside className="order-summary-sidebar">
                   <div className="order-summary-card">
                     <div className="order-summary-header">
@@ -345,9 +281,7 @@ export default function Cart() {
                       <h2 className="order-summary-title">Order Summary</h2>
                     </div>
 
-                    {/* Breakdown Lines */}
                     <div className="summary-breakdown-list">
-                      {/* Subtotal */}
                       <div className="summary-row">
                         <span className="summary-label">Subtotal ({cartCount} items)</span>
                         <strong className="summary-value" id="cart-summary-subtotal">
@@ -355,12 +289,14 @@ export default function Cart() {
                         </strong>
                       </div>
 
-                      {/* Promo Code Discount */}
-                      {appliedPromo && discountAmount > 0 && (
+                      {appliedPromo && (
                         <div className="summary-row summary-discount-row">
                           <div className="summary-discount-label">
                             <Tag size={14} />
-                            <span>Promo ({appliedPromo.code})</span>
+                            <span>
+                              Promo ({appliedPromo.code}
+                              {appliedPromo.freeShipping ? " · free shipping" : ""})
+                            </span>
                             <button
                               type="button"
                               className="remove-promo-btn"
@@ -377,28 +313,21 @@ export default function Cart() {
                         </div>
                       )}
 
-                      {/* Shipping Fee */}
                       <div className="summary-row">
-                        <span className="summary-label">Shipping Fee</span>
+                        <span className="summary-label">Shipping</span>
                         <span className="summary-value" id="cart-summary-shipping">
-                          {shipping === 0 ? (
-                            <span className="free-shipping-tag">FREE</span>
-                          ) : (
-                            formatPrice(shipping)
-                          )}
+                          {shipping === 0 ? <span className="free-shipping-tag">FREE</span> : formatPrice(shipping)}
                         </span>
                       </div>
 
-                      {/* Tax */}
                       <div className="summary-row">
-                        <span className="summary-label">Estimated Tax (3% GST)</span>
+                        <span className="summary-label">GST ({commerce.taxPercent}%)</span>
                         <span className="summary-value" id="cart-summary-tax">
                           {formatPrice(estimatedTax)}
                         </span>
                       </div>
                     </div>
 
-                    {/* Promo Code Input Field */}
                     <div className="promo-code-container">
                       <form onSubmit={handleApplyPromo} className="promo-code-form">
                         <div className="promo-input-wrap">
@@ -407,51 +336,35 @@ export default function Cart() {
                             type="text"
                             value={promoInput}
                             onChange={(e) => setPromoInput(e.target.value)}
-                            placeholder="Promo code (e.g. SHINE10)"
+                            placeholder="Promo code"
                             aria-label="Enter promotional discount code"
                             id="promo-code-input"
                           />
                         </div>
-                        <button
-                          type="submit"
-                          className="promo-apply-button"
-                          id="apply-promo-button"
-                        >
-                          Apply
+                        <button type="submit" className="promo-apply-button" id="apply-promo-button" disabled={isApplying}>
+                          {isApplying ? "…" : "Apply"}
                         </button>
                       </form>
 
                       {promoMessage && (
-                        <div
-                          className={`promo-feedback ${
-                            promoMessage.success ? "is-success" : "is-error"
-                          }`}
-                        >
+                        <div className={`promo-feedback ${promoMessage.success ? "is-success" : "is-error"}`}>
                           {promoMessage.message}
                         </div>
-                      )}
-
-                      {!appliedPromo && (
-                        <p className="promo-hint-note">
-                          ✦ Use code <strong>SHINE10</strong> for 10% off or <strong>LUSTRE20</strong> for 20% off.
-                        </p>
                       )}
                     </div>
 
                     <div className="summary-divider" />
 
-                    {/* Final Total */}
                     <div className="summary-final-total-row">
                       <div>
-                        <span className="final-total-label">Final Total</span>
-                        <span className="final-total-sub">Includes all taxes &amp; duties</span>
+                        <span className="final-total-label">Total</span>
+                        <span className="final-total-sub">Express delivery options at checkout</span>
                       </div>
                       <strong className="final-total-amount" id="cart-summary-total">
                         {formatPrice(cartTotal)}
                       </strong>
                     </div>
 
-                    {/* Proceed to Checkout CTA */}
                     <button
                       type="button"
                       className="button button-gold summary-checkout-cta"
@@ -461,34 +374,29 @@ export default function Cart() {
                       Proceed to Checkout
                     </button>
 
-                    {/* Secure Checkout Message */}
                     <div className="secure-checkout-card">
                       <div className="secure-checkout-header">
                         <ShieldCheck size={18} className="secure-shield-icon" />
                         <div>
-                          <strong>Guaranteed Safe &amp; Secure Checkout</strong>
-                          <span>256-Bit Bank-Grade SSL Encryption</span>
+                          <strong>Secure Checkout</strong>
+                          <span>Prices are confirmed on our server when you order</span>
                         </div>
                       </div>
 
                       <div className="payment-badges-row">
-                        <span className="payment-badge">UPI</span>
-                        <span className="payment-badge">VISA</span>
-                        <span className="payment-badge">Mastercard</span>
-                        <span className="payment-badge">RuPay</span>
-                        <span className="payment-badge">NetBanking</span>
+                        {payments.onlineEnabled && <span className="payment-badge">UPI / Cards</span>}
+                        {payments.codEnabled && <span className="payment-badge">Cash on Delivery</span>}
                       </div>
                     </div>
 
-                    {/* Unboxing & Guarantee perk */}
                     <div className="cart-perks-box">
                       <div className="cart-perk-item">
                         <Gift size={15} />
-                        <span>Signature gift packaging included</span>
+                        <span>Gift-ready packaging</span>
                       </div>
                       <div className="cart-perk-item">
                         <Sparkles size={15} />
-                        <span>7-Day doorstep replacement guarantee</span>
+                        <span>{commerce.returnWindowDays}-day returns</span>
                       </div>
                     </div>
                   </div>
@@ -499,33 +407,27 @@ export default function Cart() {
         </div>
       </section>
 
-      {/* ==================================================== */}
-      {/* SECTION: Recommended Products Below Cart             */}
-      {/* ==================================================== */}
-      <section className="section cart-recommended-section">
-        <div className="container">
-          <div className="section-heading">
-            <div>
-              <span className="eyebrow">Curated Complements</span>
-              <h2>You May Also Love</h2>
+      {recommendedProducts.length > 0 && (
+        <section className="section cart-recommended-section">
+          <div className="container">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Curated Complements</span>
+                <h2>You May Also Love</h2>
+              </div>
+              <Link to="/shop" className="pdp-see-all-link">
+                Explore all jewelry →
+              </Link>
             </div>
-            <Link to="/shop" className="pdp-see-all-link">
-              Explore all jewelry →
-            </Link>
-          </div>
 
-          <div className="product-grid" id="cart-recommended-grid">
-            {recommendedProducts.map((recProduct, idx) => (
-              <ProductCard
-                key={recProduct.id}
-                product={recProduct}
-                index={idx}
-                showQuickView={true}
-              />
-            ))}
+            <div className="product-grid" id="cart-recommended-grid">
+              {recommendedProducts.map((recProduct, idx) => (
+                <ProductCard key={recProduct.slug} product={recProduct} index={idx} showQuickView={true} />
+              ))}
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+      )}
     </div>
   );
 }
